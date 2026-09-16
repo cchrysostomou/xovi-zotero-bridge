@@ -1,0 +1,7 @@
+library_id = "1234567"
+library_type = "user"
+api_key = "zotero-api-key"
+
+mb_in_path = "/run/xovi-mb"
+mb_out_path = "/run/xovi-mb-out"
+state_db_path = "./zotbridge-state.db"
