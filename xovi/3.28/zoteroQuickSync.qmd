@@ -1,0 +1,121 @@
+; This patch is intentionally identical to 3.27 because the upstream
+; quickSettingsBluetooth.qmd uses the same Quick Settings resource hashes and
+; insertion selector for both firmware versions.
+; See ../3.27/zoteroQuickSync.qmd for the complete patch and requirements.
+
+SLOT zoteroQuickSync
+    INSERT {
+        ~&10845406345867313529&~ {
+            ~&5972374&~: zoteroQuickSyncToggle
+            ~&8399601734642709923&~: "qrc:/ark/icons/download"
+            ~&233726547792244&~: !zoteroSync.running
+            ~&7713561545874130&~: zoteroSync.running
+
+            Rectangle {
+                anchors.centerIn: parent
+                width: parent.width * 0.72
+                height: width
+                radius: width / 2
+                color: zoteroSync.running ? "black" : "white"
+
+                Text {
+                    anchors.centerIn: parent
+                    text: "Z"
+                    color: zoteroSync.running ? "white" : "black"
+                    font.bold: true
+                    font.pixelSize: parent.height * 0.58
+                }
+            }
+
+            AsyncCommandExecutor {
+                ~&5972374&~: zoteroSyncExecutor
+                command: "sh"
+                arguments: [
+                    "/home/root/xovi-zotero-bridge/scripts/zotbridge-run.sh",
+                    "sync-all"
+                ]
+                onStdOutAvailable: function(output) {
+                    zoteroSync.stdout += output;
+                }
+                onStdErrAvailable: function(output) {
+                    zoteroSync.stderr += output;
+                }
+                onRunningChanged: {
+                    if (!running && zoteroSync.launched) {
+                        zoteroSync.finish();
+                    }
+                }
+            }
+
+            ~&7712130752583461&~ {
+                ~&5972374&~: zoteroSync
+                property ~&6503679477&~ launched: ~&214625660372&~
+                property ~&6503679477&~ running: ~&214625660372&~
+                property ~&197102514&~ stdout: ""
+                property ~&197102514&~ stderr: ""
+
+                function notify(message) {
+                    ~&233724020023100&~.~&197092075&~(message);
+                }
+
+                function start() {
+                    if (running) {
+                        return;
+                    }
+                    stdout = "";
+                    stderr = "";
+                    launched = true;
+                    if (!zoteroSyncExecutor.startCommand(30000)) {
+                        launched = false;
+                        notify("Zotero sync could not start");
+                        return;
+                    }
+                    running = true;
+                    notify("Zotero sync started");
+                }
+
+                function finish() {
+                    launched = false;
+                    running = false;
+                    var result;
+                    try {
+                        result = JSON.parse(stdout);
+                    } catch (error) {
+                        notify("Zotero sync failed: invalid result");
+                        return;
+                    }
+                    if (zoteroSyncExecutor.exitCode === 0 && result.ok === true) {
+                        notify("Zotero sync: " + result.synced + " synced, " +
+                               result.skipped + " skipped, " +
+                               (result.reverse.uploaded || 0) + " uploaded");
+                    } else if (typeof result.failed === "number") {
+                        notify("Zotero sync partial: " + result.synced + " synced, " +
+                               result.failed + " failed");
+                    } else {
+                        notify("Zotero sync failed");
+                    }
+                }
+            }
+
+            ~&254542236275632405&~: zoteroSync.start()
+        }
+    }
+END SLOT
+
+AFFECT [[11542018640809782132]]
+    IMPORT net.asivery.CommandExecutor [[180922.180921]]
+
+    TRAVERSE ?#[[6504254477]]
+        LOCATE AFTER [[7712155293725601]]
+        INSERT SLOT zoteroQuickSync
+    END TRAVERSE
+END AFFECT
+
+AFFECT [[10936356414964521612]]
+    IMPORT net.asivery.CommandExecutor [[180922.180921]]
+
+    TRAVERSE ?#[[6504254477]]
+        LOCATE AFTER [[7712155293725601]]
+        INSERT SLOT zoteroQuickSync
+    END TRAVERSE
+END AFFECT

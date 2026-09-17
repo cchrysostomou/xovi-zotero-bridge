@@ -3,3 +3,11 @@ __pycache__/
 .venv/
 config.toml
 zotbridge-state.db
+*.egg-info/
+*.db-journal
+*.lock
+dist/
+bin/jq
+zotbridge-state.db.json
+zotbridge-state.db.json.*
+.zotbridge-work.*/

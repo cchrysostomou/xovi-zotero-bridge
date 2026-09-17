@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import contextmanager
 from pathlib import Path
+import re
 import tempfile
-from typing import Optional
+from typing import Iterator, Optional
 
 from pyzotero.zotero import Zotero
+from zotbridge.config import WebDAVConfig
+from zotbridge.webdav import WebDAVStorage
 
 
 @dataclass(frozen=True)
@@ -16,16 +20,61 @@ class Paper:
     has_pdf: bool
 
 
-class ZoteroBridge:
-    def __init__(self, library_id: str, library_type: str, api_key: str):
-        self.zot = Zotero(library_id, library_type, api_key)
+@dataclass(frozen=True)
+class LibraryPage:
+    items: list[Paper]
+    skip: int
+    limit: int
+    total: int
+    next_skip: int | None
 
-    def search(self, query: str, limit: int = 20) -> list[Paper]:
-        items = self.zot.items(q=query, limit=limit)
+
+def tag_expression(tags: list[str]) -> str:
+    if any(not tag or "||" in tag or tag.startswith("\\-") or
+           any(ord(character) < 32 or ord(character) == 127 for character in tag) for tag in tags):
+        raise ValueError("Tags must be nonempty literal names without controls, '||', or a leading '\\-'")
+    expression = " || ".join(tags)
+    return "\\" + expression if expression.startswith("-") else expression
+
+
+class ZoteroBridge:
+    def __init__(
+        self, library_id: str, library_type: str, api_key: str, webdav: WebDAVConfig | None = None
+    ):
+        self.zot = Zotero(library_id, library_type, api_key)
+        self.webdav = WebDAVStorage(webdav) if webdav is not None else None
+
+    def check_metadata(self) -> None:
+        self.zot.top(limit=1)
+
+    def search(
+        self, query: str, limit: int = 20, skip: int = 0, tags: list[str] | None = None
+    ) -> list[Paper]:
+        return self.search_page(query, limit, skip, tags).items
+
+    def search_page(
+        self, query: str, limit: int = 20, skip: int = 0, tags: list[str] | None = None
+    ) -> LibraryPage:
+        if not 1 <= limit <= 100 or not 0 <= skip <= 2147483647:
+            raise ValueError("limit must be 1-100 and skip must be 0-2147483647")
+        filters = {"tag": tag_expression(tags)} if tags else {}
+        items = self.zot.top(
+            q=query, limit=limit, start=skip, sort="dateModified", direction="desc",
+            itemType="-attachment || note || annotation", **filters,
+        )
+        raw_total = self.zot.request.headers.get("Total-Results", "")
+        if not isinstance(raw_total, str) or re.fullmatch(r"[0-9]+", raw_total) is None:
+            raise RuntimeError("Zotero response is missing a valid Total-Results header")
+        total = int(raw_total)
+        if not isinstance(items, list) or len(items) > limit:
+            raise RuntimeError("Zotero returned an invalid library page")
+        next_skip = skip + len(items) if skip + len(items) < total else None
+        if not items and next_skip is not None:
+            raise RuntimeError("Zotero returned an empty page before the end; refresh the listing")
         papers: list[Paper] = []
         for item in items:
             data = item.get("data", {})
-            if data.get("itemType") != "journalArticle":
+            if data.get("itemType") in ("attachment", "note", "annotation"):
                 continue
             item_key = data.get("key", "")
             title = data.get("title", "").strip()
@@ -34,26 +83,52 @@ class ZoteroBridge:
             papers.append(
                 Paper(item_key=item_key, title=title, year=year, has_pdf=has_pdf)
             )
-        return papers
+        return LibraryPage(papers, skip, limit, total, next_skip)
+
+    def list_tags(self, query: str = "") -> list[str]:
+        tags = self.zot.everything(self.zot.tags(q=query, limit=100))
+        if not isinstance(tags, list) or any(not isinstance(tag, str) for tag in tags):
+            raise RuntimeError("Zotero returned invalid tag data")
+        return sorted(set(tags))
 
     def _first_pdf_attachment_key(self, item_key: str) -> Optional[str]:
-        for child in self.zot.children(item_key):
+        for child in self.zot.everything(self.zot.children(item_key)):
             data = child.get("data", {})
-            if data.get("contentType") == "application/pdf":
+            if (
+                data.get("contentType") == "application/pdf"
+                and data.get("linkMode") in ("imported_file", "imported_url")
+            ):
                 return str(data["key"])
         return None
 
-    def download_first_pdf(self, item_key: str) -> tuple[str, str]:
+    @contextmanager
+    def download_first_pdf(self, item_key: str) -> Iterator[tuple[Path, str]]:
         attachment_key = self._first_pdf_attachment_key(item_key)
         if attachment_key is None:
-            raise RuntimeError(f"No PDF attachment found for item {item_key}")
+            raise RuntimeError(f"No stored PDF attachment found for item {item_key}")
 
-        with tempfile.TemporaryDirectory() as td:
-            self.zot.dump(attachment_key, path=td)
-            files = list(Path(td).glob("*"))
-            if not files:
-                raise RuntimeError(f"Download succeeded but no file found for {item_key}")
-            src = files[0]
-            out = Path.cwd() / f".tmp-{src.name}"
-            out.write_bytes(src.read_bytes())
-            return str(out), attachment_key
+        with tempfile.TemporaryDirectory(prefix="zotbridge-") as td:
+            downloaded = Path(td) / "document.pdf"
+            if self.webdav is not None:
+                attachment = self.zot.item(attachment_key)["data"]
+                self.webdav.download_pdf(attachment_key, attachment.get("filename", ""), downloaded)
+            else:
+                self.zot.dump(attachment_key, filename="document.pdf", path=td)
+            if not downloaded.is_file():
+                raise RuntimeError(f"Download produced no PDF for {item_key}")
+            with downloaded.open("rb") as pdf:
+                if not pdf.read(1024).lstrip().startswith(b"%PDF-"):
+                    raise RuntimeError(f"Downloaded attachment is not a PDF for {item_key}")
+            data = self.zot.item(item_key).get("data", {})
+            title = str(data.get("title", "")).strip() or item_key
+            title = re.sub(r'[<>:"/\\|?*\x00-\x1f,]', "_", title).strip(" .")
+            title = title.encode("utf-8")[:180].decode("utf-8", errors="ignore").rstrip(" .") or item_key
+            if title.upper().split(".")[0] in {
+                "CON", "PRN", "AUX", "NUL",
+                *(f"COM{index}" for index in range(1, 10)),
+                *(f"LPT{index}" for index in range(1, 10)),
+            }:
+                title = "_" + title
+            named_pdf = downloaded.with_name(f"{title}.pdf")
+            downloaded.rename(named_pdf)
+            yield named_pdf, attachment_key

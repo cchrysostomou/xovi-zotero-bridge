@@ -1,0 +1,482 @@
+; xovi-zotero-bridge Settings page for the reMarkable 3.28 resource layout.
+; Requires qt-resource-rebuilder, qt-command-executor, and the bridge installed
+; at /home/root/xovi-zotero-bridge. Do not install on another firmware layout.
+
+AFFECT [[12599552112012170435]]
+    IMPORT net.asivery.CommandExecutor [[180922.180921]]
+
+    TRAVERSE ?#[[6504254477]]
+        LOCATE BEFORE ALL
+        INSERT {
+            readonly property ~&197088788&~ _zoteroBridgeSettingsIndex: {
+                ~&197102514&~ seed = "cchrysosdtx/zotero-bridge", hash = 0;
+                ~&197085552&~ (~&197102514&~ index = 0; index < seed.~&7082886407723&~; index++) hash = ((hash << 5) - hash + seed.charCodeAt(index)) | 0;
+                ~&7083121450889&~ 1000 + (hash & 0x3FFFFFFF);
+            }
+        }
+
+        TRAVERSE ?#[[4442117794842111784]]
+            LOCATE BEFORE [[6502786168]]
+            INSERT {
+                ~&425121728314878811&~.~&452264033555071090&~ {
+                    ~&5972374&~: zoteroBridgeSidebarItem
+                    ~&6504337259&~: ~&254477762679831355&~.~&233703109346403&~.~&233740920352621&~
+                    ~&6504315758&~: ~&8400072892861785085&~ ? ~&6504222003&~("Zotero Bridge") : ""
+                    ~&8399601734642709923&~: ~&"5203945921812648813&~
+                    ~&484431552542639914&~: ~&6504254477&~.~&14975398563385417838&~ === ~&6504254477&~._zoteroBridgeSettingsIndex
+                    ~&7081629735527&~.~&254529418434902000&~: ~&6504329801&~
+                    ~&495358363329399331&~: {
+                        ~&6504254477&~.~&14975398563385417838&~ = ~&6504254477&~._zoteroBridgeSettingsIndex;
+                        ~&16542060515769262500&~.~&233743626668842&~ = ~&6504329801&~;
+                    }
+                }
+            }
+        END TRAVERSE
+
+        TRAVERSE [[7081645463424]]#[[5556919789846348618]]
+            REBUILD [[16021043814775702381]]
+                LOCATE BEFORE STREAM / default: ~&7083121450889&~ ~&6504117156&~; /
+                INSERT STREAM / ~&6503700293&~ ~&6504254477&~._zoteroBridgeSettingsIndex: ~&7083121450889&~ zoteroBridgeSettingsPage; /
+            END REBUILD
+        END TRAVERSE
+
+        LOCATE AFTER [[254480451320573660]]#[[6503884114]]
+        INSERT {
+            ~&254480451320573660&~ {
+                ~&5972374&~: zoteroBridgeSettingsPage
+                Item {
+                    id: bridgeSettings
+                    anchors.fill: parent
+                    property var settings: ({})
+                    property var tags: []
+                    property var events: []
+                    property string status: "Loading bridge settings…"
+                    property string queueTag: ""
+                    property string syncedTag: ""
+                    property string openTagPicker: ""
+                    property string tagFilter: "All"
+                    property bool tagsVisible: false
+                    property string commandError: ""
+                    property bool rmapiInstalled: false
+                    property bool rmapiPaired: false
+                    property bool busy: false
+
+                    function filteredTags() {
+                        var query = openTagPicker === "queue" ? queueInput.text : syncedInput.text;
+                        query = query.toLowerCase();
+                        return tags.filter(function(tag) {
+                            return query.length === 0 || tag.toLowerCase().indexOf(query) !== -1;
+                        });
+                    }
+
+                    function visibleTags() {
+                        if (tagFilter === "All") return tags;
+                        if (tagFilter === "#") return tags.filter(function(tag) {
+                            return tag.length > 0 && !(/[A-Za-z]/.test(tag.charAt(0)));
+                        });
+                        return tags.filter(function(tag) {
+                            return tag.length > 0 && tag.charAt(0).toUpperCase() === tagFilter;
+                        });
+                    }
+
+                    AsyncCommandExecutor {
+                        id: settingsCommand
+                        command: "sh"
+                        property string output: ""
+                        property string errorOutput: ""
+                        onStdOutAvailable: function(chunk) { output += chunk; }
+                        onStdErrAvailable: function(chunk) { errorOutput += chunk; }
+                        onRunningChanged: {
+                            if (!running && bridgeSettings.busy) {
+                                bridgeSettings.finishCommand();
+                            }
+                        }
+                    }
+
+                    function run(arguments) {
+                        if (busy) return;
+                        busy = true;
+                        settingsCommand.output = "";
+                        settingsCommand.errorOutput = "";
+                        settingsCommand.arguments = [
+                            "/home/root/xovi-zotero-bridge/scripts/zotbridge-run.sh"
+                        ].concat(arguments);
+                        if (!settingsCommand.startCommand(30000)) {
+                            busy = false;
+                            status = "Could not start bridge command";
+                        }
+                    }
+
+                    function finishCommand() {
+                        busy = false;
+                        var result;
+                        try { result = JSON.parse(settingsCommand.output); }
+                        catch (error) {
+                            status = settingsCommand.exitCode !== 0 ?
+                                "Bridge command failed (exit " + settingsCommand.exitCode +
+                                ", " + settingsCommand.output.length + " response bytes)" :
+                                "Bridge returned an invalid response (" +
+                                settingsCommand.output.length + " response bytes)";
+                            return;
+                        }
+                        if (Array.isArray(result)) {
+                            tags = result;
+                            status = "Loaded " + result.length + " tags";
+                            return;
+                        }
+                        if (settingsCommand.exitCode !== 0 || result.ok !== true) {
+                            status = "Bridge error: " + (result.error ||
+                                "command exited " + settingsCommand.exitCode);
+                            return;
+                        }
+                        if (result.metadata) {
+                            status = result.metadata === "accessible" && result.webdav === "accessible" ?
+                                "Zotero API and WebDAV are reachable" : "Connection test incomplete";
+                        } else if (result.webdav && typeof result.webdav === "object") {
+                            settings = result;
+                            rmapiInstalled = !!(result.rmapi && result.rmapi.installed);
+                            rmapiPaired = !!(result.rmapi && result.rmapi.paired);
+                            rmapiHint.text = "Paired status: " + (rmapiPaired ? "✓" : "✕") +
+                                (rmapiInstalled ? "" : " (rmapi unavailable)");
+                            urlInput.text = result.webdav.url || "";
+                            usernameInput.text = result.webdav.username || "";
+                            passwordInput.text = "";
+                            folderInput.text = result.default_target_folder || "";
+                            reverseFolderInput.text = result.reverse_sync_folder || "Zotero/Read";
+                            queueTag = result.sync_queue_tag || "";
+                            syncedTag = result.sync_synced_tag || "";
+                            passwordHint.text = result.webdav.password_set ?
+                                "Password stored; leave blank to keep it" : "No password stored";
+                            status = result.applied ? "Settings saved" : "Settings loaded";
+                            if (!result.applied) run(["tags", "--json"]);
+                        } else if (result.rmapi) {
+                            rmapiInstalled = !!result.rmapi.installed;
+                            rmapiPaired = !!result.rmapi.paired;
+                            rmapiCode.text = "";
+                            rmapiHint.text = "Paired status: " + (rmapiPaired ? "✓" : "✕") +
+                                (rmapiInstalled ? "" : " (rmapi unavailable)");
+                            status = rmapiPaired ? "reMarkable Cloud pairing complete" :
+                                "reMarkable Cloud is not paired";
+                        } else if (result.entries) {
+                            events = result.entries.slice().reverse();
+                            status = "Loaded " + result.entries.length + " log events";
+                        } else {
+                            status = "Bridge returned an unsupported response";
+                        }
+                    }
+
+                    function saveSettings() {
+                        var draft = {
+                            version: 1,
+                            webdav_url: urlInput.text,
+                            webdav_username: usernameInput.text,
+                            default_target_folder: folderInput.text,
+                            reverse_sync_folder: reverseFolderInput.text,
+                            sync_queue_tag: queueTag,
+                            sync_synced_tag: syncedTag
+                        };
+                        if (passwordInput.text.length > 0) draft.webdav_password = passwordInput.text;
+                        var request = new XMLHttpRequest();
+                        request.open("PUT", "file:///home/root/xovi-zotero-bridge/.zotbridge-settings-draft.json");
+                        request.onreadystatechange = function() {
+                            if (request.readyState !== XMLHttpRequest.DONE) return;
+                            if (request.status !== 0 && (request.status < 200 || request.status >= 300)) {
+                                bridgeSettings.status = "Could not save settings draft";
+                                return;
+                            }
+                            bridgeSettings.run(["settings-apply"]);
+                        };
+                        request.send(JSON.stringify(draft));
+                    }
+
+                    function pairRmapi() {
+                        if (rmapiCode.text.length !== 8) {
+                            status = "Pairing code must contain exactly eight characters";
+                            return;
+                        }
+                        var draft = {version: 1, code: rmapiCode.text};
+                        rmapiCode.text = "";
+                        var request = new XMLHttpRequest();
+                        request.open("PUT", "file:///home/root/xovi-zotero-bridge/.zotbridge-rmapi-pair-draft.json");
+                        request.onreadystatechange = function() {
+                            if (request.readyState !== XMLHttpRequest.DONE) return;
+                            if (request.status !== 0 && (request.status < 200 || request.status >= 300)) {
+                                bridgeSettings.status = "Could not save pairing draft";
+                                return;
+                            }
+                            bridgeSettings.run([bridgeSettings.rmapiPaired ? "rmapi-repair" : "rmapi-pair"]);
+                        };
+                        request.send(JSON.stringify(draft));
+                    }
+
+                    Component.onCompleted: {
+                        run(["settings", "--json"]);
+                    }
+
+                    Flickable {
+                        anchors.fill: parent
+                        contentWidth: width
+                        contentHeight: form.height + 80
+                        clip: true
+                        Column {
+                            id: form
+                            width: parent.width - 80
+                            x: 40
+                            y: 40
+                            spacing: 18
+
+                            Text { text: "Zotero Bridge"; font.pixelSize: 40; font.bold: true }
+                            Text { text: bridgeSettings.status; font.pixelSize: 22; wrapMode: Text.WordWrap; width: parent.width }
+                            Text { text: "WebDAV storage"; font.pixelSize: 30; font.bold: true }
+                            Text { text: "Server URL (HTTPS)"; font.pixelSize: 22 }
+                            TextInput { id: urlInput; width: parent.width; font.pixelSize: 24; selectByMouse: true }
+                            Rectangle { width: parent.width; height: 2; color: "black" }
+                            Text { text: "Username"; font.pixelSize: 22 }
+                            TextInput { id: usernameInput; width: parent.width; font.pixelSize: 24; selectByMouse: true }
+                            Rectangle { width: parent.width; height: 2; color: "black" }
+                            Text { text: "Password"; font.pixelSize: 22 }
+                            TextInput { id: passwordInput; width: parent.width; font.pixelSize: 24; echoMode: TextInput.Password; selectByMouse: true }
+                            Text { id: passwordHint; font.pixelSize: 18 }
+                            Text { text: "reMarkable folder path"; font.pixelSize: 22 }
+                            TextInput { id: folderInput; width: parent.width; font.pixelSize: 24; selectByMouse: true }
+                            Rectangle { width: parent.width; height: 2; color: "black" }
+                            Text { text: "Queue tag"; font.pixelSize: 22 }
+                            Rectangle {
+                                width: parent.width; height: 64; border.width: 2; border.color: "black"; color: "white"
+                                TextInput {
+                                    id: queueInput
+                                    anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12
+                                    font.pixelSize: 24; selectByMouse: true
+                                    text: bridgeSettings.queueTag
+                                    onActiveFocusChanged: {
+                                        if (activeFocus && bridgeSettings.tags.length > 0)
+                                            bridgeSettings.openTagPicker = "queue";
+                                    }
+                                    onTextChanged: {
+                                        bridgeSettings.queueTag = text;
+                                        if (activeFocus && bridgeSettings.tags.length > 0)
+                                            bridgeSettings.openTagPicker = "queue";
+                                    }
+                                }
+                            }
+                            Text { text: "Completion tag"; font.pixelSize: 22 }
+                            Rectangle {
+                                width: parent.width; height: 64; border.width: 2; border.color: "black"; color: "white"
+                                TextInput {
+                                    id: syncedInput
+                                    anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12
+                                    font.pixelSize: 24; selectByMouse: true
+                                    text: bridgeSettings.syncedTag
+                                    onActiveFocusChanged: {
+                                        if (activeFocus && bridgeSettings.tags.length > 0)
+                                            bridgeSettings.openTagPicker = "synced";
+                                    }
+                                    onTextChanged: {
+                                        bridgeSettings.syncedTag = text;
+                                        if (activeFocus && bridgeSettings.tags.length > 0)
+                                            bridgeSettings.openTagPicker = "synced";
+                                    }
+                                }
+                            }
+                            Flickable {
+                                visible: bridgeSettings.openTagPicker !== ""
+                                width: parent.width; height: visible ? 430 : 0; clip: true
+                                contentWidth: width; contentHeight: tagChoices.height
+                                Column {
+                                    id: tagChoices; width: parent.width
+                                    Repeater {
+                                        model: bridgeSettings.filteredTags()
+                                        delegate: Rectangle {
+                                            width: tagChoices.width; height: 54
+                                            color: "white"; border.width: 1; border.color: "black"
+                                            Text { anchors.verticalCenter: parent.verticalCenter; x: 12; text: modelData; font.pixelSize: 22 }
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                onClicked: {
+                                                    if (bridgeSettings.openTagPicker === "queue")
+                                                        bridgeSettings.queueTag = modelData;
+                                                    else
+                                                        bridgeSettings.syncedTag = modelData;
+                                                    queueInput.focus = false;
+                                                    syncedInput.focus = false;
+                                                    bridgeSettings.openTagPicker = "";
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Rectangle { width: parent.width; height: 2; color: "black" }
+                            Row {
+                                spacing: 16
+                                Rectangle {
+                                    width: 260; height: 64; color: bridgeSettings.busy ? "#aaaaaa" : "black"
+                                    Text { anchors.centerIn: parent; text: "Save settings"; color: "white"; font.pixelSize: 24 }
+                                    MouseArea { anchors.fill: parent; enabled: !bridgeSettings.busy; onClicked: bridgeSettings.saveSettings() }
+                                }
+                                Rectangle {
+                                    width: 360; height: 64; color: bridgeSettings.busy ? "#aaaaaa" : "black"
+                                    Text { anchors.centerIn: parent; text: "Test Zotero connection"; color: "white"; font.pixelSize: 24 }
+                                    MouseArea { anchors.fill: parent; enabled: !bridgeSettings.busy; onClicked: bridgeSettings.run(["check-connection", "--webdav"]) }
+                                }
+                            }
+                            Text { text: "Sync to Zotero from reMarkable Cloud"; font.pixelSize: 30; font.bold: true }
+                            Text { text: "reMarkable source folder"; font.pixelSize: 22 }
+                            TextInput {
+                                id: reverseFolderInput
+                                width: parent.width; font.pixelSize: 24; selectByMouse: true
+                                text: "Zotero/Read"
+                            }
+                            Rectangle { width: parent.width; height: 2; color: "black" }
+                            Text {
+                                text: "Generate a desktop code at my.remarkable.com/device/browser/connect"
+                                width: parent.width; font.pixelSize: 18; wrapMode: Text.WordWrap
+                            }
+                            Text {
+                                id: rmapiHint
+                                text: "Paired status: " + (bridgeSettings.rmapiPaired ? "✓" : "✕")
+                                font.pixelSize: 20
+                            }
+                            Row {
+                                spacing: 16
+                                Rectangle {
+                                    width: 280; height: 64
+                                    color: "white"
+                                    border.width: 2; border.color: "black"
+                                    TextInput {
+                                        id: rmapiCode
+                                        anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12
+                                        font.pixelSize: 24; selectByMouse: true
+                                        enabled: bridgeSettings.rmapiInstalled
+                                        maximumLength: 8
+                                    }
+                                }
+                                Rectangle {
+                                    width: 220; height: 64
+                                    color: (!bridgeSettings.busy && bridgeSettings.rmapiInstalled &&
+                                            rmapiCode.text.length === 8) ?
+                                           "black" : "#aaaaaa"
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: bridgeSettings.rmapiPaired ? "Re-pair" : "Pair"
+                                        color: "white"; font.pixelSize: 24
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        enabled: !bridgeSettings.busy && bridgeSettings.rmapiInstalled &&
+                                                 rmapiCode.text.length === 8
+                                        onClicked: bridgeSettings.pairRmapi()
+                                    }
+                                }
+                            }
+                            Text { text: "Available Zotero tags"; font.pixelSize: 30; font.bold: true }
+                            Row {
+                                spacing: 16
+                                Rectangle {
+                                    width: 260; height: 64; color: bridgeSettings.busy ? "#aaaaaa" : "black"
+                                    Text { anchors.centerIn: parent; text: "Refresh tags"; color: "white"; font.pixelSize: 24 }
+                                    MouseArea { anchors.fill: parent; enabled: !bridgeSettings.busy; onClicked: bridgeSettings.run(["tags", "--refresh", "--json"]) }
+                                }
+                                Rectangle {
+                                    width: 220; height: 64; color: "black"
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: bridgeSettings.tagsVisible ? "Hide tags" : "Show tags"
+                                        color: "white"; font.pixelSize: 22
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        onClicked: bridgeSettings.tagsVisible = !bridgeSettings.tagsVisible
+                                    }
+                                }
+                            }
+                            Text { text: bridgeSettings.tags.length + " cached tags available"; font.pixelSize: 20 }
+                            Flickable {
+                                visible: bridgeSettings.tagsVisible
+                                width: parent.width; height: visible ? 58 : 0; clip: true
+                                contentWidth: tagFilters.width; contentHeight: height
+                                Column {
+                                    id: tagFilters; width: tagFilterRow.width
+                                    Row {
+                                        id: tagFilterRow
+                                        spacing: 8
+                                        Repeater {
+                                            model: ["All", "#", "A", "B", "C", "D", "E", "F", "G",
+                                                    "H", "I", "J", "K", "L", "M", "N", "O", "P",
+                                                    "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"]
+                                            delegate: Rectangle {
+                                                width: modelData === "All" ? 66 : 44; height: 52
+                                                color: bridgeSettings.tagFilter === modelData ? "black" : "white"
+                                                border.width: 2; border.color: "black"
+                                                Text {
+                                                    anchors.centerIn: parent; text: modelData
+                                                    color: bridgeSettings.tagFilter === modelData ? "white" : "black"
+                                                    font.pixelSize: 20
+                                                }
+                                                MouseArea {
+                                                    anchors.fill: parent
+                                                    onClicked: bridgeSettings.tagFilter = modelData
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Rectangle {
+                                visible: bridgeSettings.tagsVisible
+                                width: parent.width; height: visible ? 300 : 0
+                                color: "white"; border.width: 2; border.color: "black"
+                                Flickable {
+                                    anchors.fill: parent; anchors.margins: 10
+                                    clip: true
+                                    contentWidth: width; contentHeight: availableTags.height
+                                    interactive: contentHeight > height
+                                    Column {
+                                        id: availableTags; width: parent.width
+                                        Repeater {
+                                            model: bridgeSettings.visibleTags()
+                                            delegate: Text {
+                                                width: availableTags.width; height: 34
+                                                text: modelData; font.pixelSize: 20
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Text { text: "Recent bridge events"; font.pixelSize: 30; font.bold: true }
+                            Rectangle {
+                                width: 260; height: 64; color: bridgeSettings.busy ? "#aaaaaa" : "black"
+                                Text { anchors.centerIn: parent; text: "Refresh log"; color: "white"; font.pixelSize: 24 }
+                                MouseArea { anchors.fill: parent; enabled: !bridgeSettings.busy; onClicked: bridgeSettings.run(["activity-log"]) }
+                            }
+                            Rectangle {
+                                width: parent.width; height: 300
+                                color: "white"; border.width: 2; border.color: "black"
+                                Flickable {
+                                    anchors.fill: parent; anchors.margins: 10
+                                    clip: true
+                                    contentWidth: width
+                                    contentHeight: eventText.height
+                                    interactive: contentHeight > height
+                                    Text {
+                                        id: eventText
+                                        text: bridgeSettings.events.map(function(event) {
+                                            return event.timestamp + "  " + event.action + "  " +
+                                              event.event + (event.tag ? " [" + event.tag + "]" : "") +
+                                              (event.count !== undefined ? " " + event.count : "") +
+                                              (event.rm_uuid ? " [" + event.rm_uuid + "]" : "") +
+                                              (event.stage ? " stage=" + event.stage : "") +
+                                              (event.error ? " (" + event.error + ")" : "") +
+                                              (event.retained_in_source ? " retained in source" : "");
+                                        }).join("\n")
+                                        width: parent.width; font.pixelSize: 18; wrapMode: Text.WordWrap
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    END TRAVERSE
+END AFFECT

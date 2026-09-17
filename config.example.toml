@@ -2,6 +2,24 @@ library_id = "1234567"
 library_type = "user"
 api_key = "zotero-api-key"
 
+# Metadata still comes from Zotero; attachment ZIPs come from this WebDAV directory.
+use_webdav = true
+webdav_url = "https://webdav.example.com/path/to/zotero/"
+webdav_username = "webdav-user"
+webdav_password = "webdav-app-password"
+webdav_timeout_s = 60.0
+webdav_max_download_mb = 100
+# webdav_allow_http = true  # Only for a trusted network; HTTP sends credentials unencrypted.
+
 mb_in_path = "/run/xovi-mb"
 mb_out_path = "/run/xovi-mb-out"
+default_target_folder = "Zotero/unread"
+reverse_sync_folder = "Zotero/Read"
+sync_queue_tag = "to_sync"
+sync_synced_tag = "synced"
 state_db_path = "./zotbridge-state.db"
+# Bridge-owned JSON state and tag cache; separate from Python's legacy SQLite import database.
+# Tags are cached until an explicit `tags --refresh`; each library/query has its own entry.
+# state_json_path = "./zotbridge-state.db.json"
+broker_timeout_s = 30.0
+xochitl_dir = "/home/root/.local/share/remarkable/xochitl"
