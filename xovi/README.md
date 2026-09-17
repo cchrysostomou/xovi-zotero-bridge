@@ -104,8 +104,10 @@ source folder and appear in the activity log with UUID, stage, and error code.
 The forward phase reads live `to_sync` tags on both references and attachments. A tagged
 reference selects its first stored PDF; a tagged attachment selects that exact
 PDF. Overlapping selections reuse the UUID mapping instead of importing twice.
-After a confirmed import, the backend changes only the queued source's tag to
-`synced`, preserving its other tags. Zotero API write permission is required.
+After a confirmed import, the backend adds the queued source's other Zotero tags
+to the reMarkable document while preserving existing reMarkable tags, then
+changes only the source's `to_sync` tag to `synced`. Zotero API write permission
+is required.
 
 Imports use `default_target_folder` from `config.toml` (default `Zotero/unread`).
 ReMarkable library browsing and a destination picker are deferred from this MVP.

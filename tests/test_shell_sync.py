@@ -141,6 +141,12 @@ class TaggedSyncTests(unittest.TestCase):
         if request.startswith(b">eensureFolder:"):
             (self.library / f"{self.folder.decode()}.metadata").write_text(
                 '{"type":"CollectionType","parent":""}')
+        elif request.startswith(b">esetTags:"):
+            document, tags = request.decode().strip().split(":", 1)[1].split(",", 1)
+            metadata = self.library / f"{document}.metadata"
+            current = json.loads(metadata.read_text())
+            current["tags"] = tags.split(";") if tags else []
+            metadata.write_text(json.dumps(current))
         else:
             source, parent = request.decode().strip().split(":", 1)[1].rsplit(",", 1)
             uuid = [self.document, self.second_document][len(self.imported)].decode()
@@ -161,10 +167,11 @@ class TaggedSyncTests(unittest.TestCase):
             item("HOSTED12", "attachment", ["to_sync"], "ITEM1234"),
             item("SECOND12", "attachment", ["to_sync"], "ITEM1234"),
         ], page_size=1)
-        with self.broker_reply([self.folder, self.document, self.folder, self.second_document],
+        with self.broker_reply([self.folder, self.document, b"ok",
+                                self.folder, self.second_document],
                                self.simulate) as broker:
             result = self.assert_ok(self.run_cli("sync-tagged"))
-        self.assertEqual(len(broker), 4)
+        self.assertEqual(len(broker), 5)
         self.assertEqual((result["total"], result["synced"], result["failed"]), (3, 3, 0))
         self.assertTrue(result["results"][1]["already_imported"])
         self.assertEqual(result["results"][0]["rm_uuid"], result["results"][1]["rm_uuid"])
@@ -179,9 +186,63 @@ class TaggedSyncTests(unittest.TestCase):
         self.assertEqual(len(state["mappings"]), 2)
         self.assertEqual({t["tag"] for t in self.tags("ITEM1234")}, {"synced", "unread"})
         self.assertEqual(self.tags("HOSTED12"), [{"tag": "synced", "type": 0}])
+        first_metadata = json.loads((self.library / f"{self.document.decode()}.metadata").read_text())
+        second_metadata = json.loads((self.library / f"{self.second_document.decode()}.metadata").read_text())
+        self.assertEqual(first_metadata["tags"], ["unread"])
+        self.assertEqual(second_metadata.get("tags", []), [])
         status = self.assert_ok(self.run_cli("status", "--item-key", "HOSTED12"))
         self.assertEqual(status["mapping"]["rm_uuid"], self.document.decode())
         self.assertFalse(list(self.root.glob(".zotbridge-work.*")))
+
+    def test_zotero_tags_are_applied_to_existing_mapping_except_queue_tag(self):
+        self.seed([
+            item("ITEM1234", tags=["to_sync", "review", "machine learning", "café"]),
+            item("HOSTED12", "attachment", parent="ITEM1234"),
+        ])
+        with self.broker_reply([self.folder, self.document, b"ok"], self.simulate):
+            first = self.assert_ok(self.run_cli("sync-tagged"))
+        self.assertEqual(first["synced"], 1)
+        metadata = json.loads((self.library / f"{self.document.decode()}.metadata").read_text())
+        self.assertEqual(metadata["tags"], ["café", "machine learning", "review"])
+
+        db = json.loads(self.db.read_text())
+        db["items"]["ITEM1234"]["data"]["tags"] = [
+            {"tag": "to_sync", "type": 0}, {"tag": "updated", "type": 0},
+        ]
+        self.db.write_text(json.dumps(db))
+        with self.broker_reply([b"ok"], self.simulate):
+            second = self.assert_ok(self.run_cli("sync-item", "--item-key", "ITEM1234"))
+        self.assertTrue(second["already_imported"])
+        metadata = json.loads((self.library / f"{self.document.decode()}.metadata").read_text())
+        self.assertEqual(metadata["tags"], ["café", "machine learning", "review", "updated"])
+
+    def test_unrepresentable_zotero_tag_retains_queue_tag(self):
+        self.seed([
+            item("ITEM1234", tags=["to_sync", "bad;tag"]),
+            item("HOSTED12", "attachment", parent="ITEM1234"),
+        ])
+        with self.broker_reply([self.folder, self.document], self.simulate):
+            result = self.run_cli("sync-tagged")
+        self.assertNotEqual(result.returncode, 0)
+        data = json.loads(result.stdout)
+        self.assertEqual(data["results"][0]["error"], "unsupported_tag")
+        self.assertEqual(self.tags("ITEM1234"), [
+            {"tag": "to_sync", "type": 0}, {"tag": "bad;tag", "type": 0},
+        ])
+
+    def test_tag_update_failure_retains_queue_tag(self):
+        self.seed([
+            item("ITEM1234", tags=["to_sync", "review"]),
+            item("HOSTED12", "attachment", parent="ITEM1234"),
+        ])
+        with self.broker_reply([self.folder, self.document, b"FAILED"], self.simulate):
+            result = self.run_cli("sync-tagged")
+        self.assertNotEqual(result.returncode, 0)
+        data = json.loads(result.stdout)
+        self.assertEqual(data["results"][0]["error"], "tag_update_error")
+        self.assertEqual(self.tags("ITEM1234"), [
+            {"tag": "to_sync", "type": 0}, {"tag": "review", "type": 0},
+        ])
 
     def test_attachment_before_parent_also_reuses_same_pdf(self):
         self.seed([
@@ -244,7 +305,7 @@ class TaggedSyncTests(unittest.TestCase):
         self.seed([
             item("HOSTED12", "attachment", ["to_sync", "keep", "synced"]),
         ], conflicts=1)
-        with self.broker_reply([self.folder, self.document], self.simulate):
+        with self.broker_reply([self.folder, self.document, b"ok", b"ok"], self.simulate):
             self.assert_ok(self.run_cli("sync-tagged"))
         self.assertEqual(self.tags("HOSTED12"), [
             {"tag": "keep", "type": 0}, {"tag": "synced", "type": 0},
@@ -254,7 +315,7 @@ class TaggedSyncTests(unittest.TestCase):
 
     def test_repeated_conflicts_leave_queue_tag_and_verified_mapping(self):
         self.seed([item("HOSTED12", "attachment", ["to_sync"])], conflicts=3)
-        with self.broker_reply([self.folder, self.document], self.simulate):
+        with self.broker_reply([self.folder, self.document, b"ok"], self.simulate):
             result = self.run_cli("sync-tagged")
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(json.loads(result.stdout)["results"][0]["error"], "write_conflict")

@@ -283,6 +283,7 @@ CLI (eventually launched asynchronously by the xovi UI)
   -> Zotero Storage OR configured WebDAV server: download the PDF
   -> xovi-message-broker: ensure target folder, import PDF
   -> read back imported PDF/metadata/content on the tablet
+  -> sync the source's non-queue Zotero tags to the reMarkable document
   -> local state: save Zotero item/attachment keys and reMarkable UUID
   -> sync commands only: conditionally replace the source's queue tag in Zotero
   -> JSON result, temporary-file cleanup, process exit
@@ -397,6 +398,12 @@ the mapping remains. Rerunning sync can retry the tag update without another
 download/import. Network failures can leave the write outcome unknown; the next
 run reconciles against the live tags. Uncertain broker imports are never retried
 automatically.
+
+Before writeback, the bridge adds every source tag except the configured queue
+tag to the imported reMarkable document, preserving tags already present there.
+The update is verified in local reMarkable metadata. A broker failure or a tag
+containing a comma, semicolon, or control character leaves the Zotero item queued
+instead of reporting a completed sync.
 
 Batch output contains `ok`, `total`, `processed`, `synced`, `skipped`, `failed`,
 `remaining` (unprocessed keys), and per-source `results`. `synced` counts source

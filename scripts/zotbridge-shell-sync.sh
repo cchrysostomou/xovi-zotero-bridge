@@ -92,6 +92,33 @@ import_selected_pdf() {
     [[ $COMMAND == sync-item ]] || "$JQ" '.' "$WORK/import-result.json"
 }
 
+apply_source_tags() {
+    local tags payload
+    "$JQ" -c --arg queue "$QUEUE_TAG" '[.data.tags[].tag | select(.!=$queue)] | unique' \
+      "$WORK/item.json" >"$WORK/source-tags.json"
+    "$JQ" -e 'length>0' "$WORK/source-tags.json" >/dev/null || return 0
+    "$JQ" -c --slurpfile source "$WORK/source-tags.json" '
+      [(.tags // [])[], $source[0][]] | unique' \
+      "$LIBRARY/$DOCUMENT_UUID.metadata" >"$WORK/remarkable-tags.json" ||
+      fail tag_verification_error "The imported document metadata could not be read before setting its tags."
+    "$JQ" -e '
+      all(.[]; type=="string" and length>0
+          and (contains(";") or contains(",") or test("[\u0000-\u001f\u007f]") | not))' \
+      "$WORK/remarkable-tags.json" >/dev/null ||
+      fail unsupported_tag "A tag cannot be represented through rm-librarian because it is empty or contains a comma, semicolon, or control character."
+    tags="$("$JQ" -c '.tags // [] | unique' "$LIBRARY/$DOCUMENT_UUID.metadata")" ||
+      fail tag_verification_error "The imported document metadata could not be read before setting its tags."
+    [[ $tags != "$(<"$WORK/remarkable-tags.json")" ]] || return 0
+    payload="$("$JQ" -r 'join(";")' "$WORK/remarkable-tags.json")"
+    broker setTags "$DOCUMENT_UUID,$payload" optional
+    [[ $BROKER_REPLY == ok ]] ||
+      fail tag_update_error "rm-librarian did not confirm the reMarkable tag update; the Zotero completion tag was not changed."
+    tags="$("$JQ" -c '.tags // [] | unique' "$LIBRARY/$DOCUMENT_UUID.metadata")" ||
+      fail tag_verification_error "The imported document metadata could not be read after setting its tags."
+    [[ $tags == "$(<"$WORK/remarkable-tags.json")" ]] ||
+      fail tag_verification_error "The imported document tags did not match the Zotero source tags; its Zotero completion tag was not changed."
+}
+
 validate_sync_tags() {
     "$JQ" -ne --arg queue "$QUEUE_TAG" --arg done "$SYNCED_TAG" '
       $queue!=$done and ([$queue,$done] | all(.[];
@@ -119,6 +146,7 @@ mark_source_synced() {
             TAG_UPDATED=false
             return
         fi
+        apply_source_tags
         version="$("$JQ" -r '.version' "$WORK/item.json")"
         "$JQ" --arg queue "$QUEUE_TAG" --arg done "$SYNCED_TAG" '
           {tags:(.data.tags | map(select(.tag!=$queue)) |
@@ -147,6 +175,7 @@ sync_item() {
     fi
     resolve_attachment
     import_selected_pdf
+    DOCUMENT_UUID="$("$JQ" -r '.rm_uuid' "$WORK/import-result.json")"
     mark_source_synced
     "$JQ" --argjson changed "$TAG_UPDATED" '.+{skipped:false,tag_updated:$changed}' "$WORK/import-result.json"
 }
@@ -214,7 +243,7 @@ sync_tagged() {
         "$JQ" -c --arg key "$key" '.+{item_key:$key}' "$WORK/one-result.json" >>"$WORK/results.jsonl"
         # Abort on shared infrastructure failures; item-specific failures can continue.
         if ((result != 0)) && "$JQ" -e '.error |
-          IN("unsupported_item","no_pdf","source_changed","write_conflict","verification_error") | not' \
+          IN("unsupported_item","unsupported_tag","no_pdf","source_changed","write_conflict","verification_error") | not' \
           "$WORK/one-result.json" >/dev/null; then stop=true; fi
         [[ ! -e $MB_IN.zotbridge-pending ]] || stop=true
     done <"$WORK/queue.jsonl"
