@@ -28,6 +28,15 @@ resolve_attachment() {
     [[ -n $ATTACHMENT ]] || fail no_pdf "No stored PDF attachment found for the reference."
 }
 
+load_attachment_filename() {
+    metadata "items/$ATTACHMENT" "$WORK/attachment.json"
+    "$JQ" -e --arg key "$ATTACHMENT" '.data.key==$key and
+      (.data.filename|type=="string" and length>0 and
+        (test("[\u0000-\u001f\u007f]") | not))' "$WORK/attachment.json" >/dev/null ||
+      fail zotero_error "Zotero returned invalid PDF attachment metadata."
+    ZOTERO_FILENAME="$("$JQ" -r '.data.filename' "$WORK/attachment.json")"
+}
+
 verify_mapped_document() {
     local uuid parent depth=0
     uuid="$("$JQ" -r '.rm_uuid' "$WORK/mapping.json")"
@@ -112,11 +121,7 @@ apply_source_tags() {
     payload="$("$JQ" -r 'join(";")' "$WORK/remarkable-tags.json")"
     broker setTags "$DOCUMENT_UUID,$payload" optional
     [[ $BROKER_REPLY == ok ]] ||
-      fail tag_update_error "rm-librarian did not confirm the reMarkable tag update; the Zotero completion tag was not changed."
-    tags="$("$JQ" -c '.tags // [] | unique' "$LIBRARY/$DOCUMENT_UUID.metadata")" ||
-      fail tag_verification_error "The imported document metadata could not be read after setting its tags."
-    [[ $tags == "$(<"$WORK/remarkable-tags.json")" ]] ||
-      fail tag_verification_error "The imported document tags did not match the Zotero source tags; its Zotero completion tag was not changed."
+      fail tag_update_error "rm-librarian did not confirm the reMarkable tag update."
 }
 
 validate_sync_tags() {
@@ -146,7 +151,6 @@ mark_source_synced() {
             TAG_UPDATED=false
             return
         fi
-        apply_source_tags
         version="$("$JQ" -r '.version' "$WORK/item.json")"
         "$JQ" --arg queue "$QUEUE_TAG" --arg done "$SYNCED_TAG" '
           {tags:(.data.tags | map(select(.tag!=$queue)) |
@@ -174,10 +178,24 @@ sync_item() {
         return
     fi
     resolve_attachment
+    load_attachment_filename
+    activity_event hit "" "$QUEUE_TAG" "" "$ITEM_KEY" "$ZOTERO_FILENAME"
     import_selected_pdf
     DOCUMENT_UUID="$("$JQ" -r '.rm_uuid' "$WORK/import-result.json")"
     mark_source_synced
-    "$JQ" --argjson changed "$TAG_UPDATED" '.+{skipped:false,tag_updated:$changed}' "$WORK/import-result.json"
+    REMARKABLE_TAGS_UPDATED=false
+    REMARKABLE_TAGS_ERROR=
+    if (apply_source_tags) >"$WORK/tag-result.json"; then
+        REMARKABLE_TAGS_UPDATED=true
+    else
+        REMARKABLE_TAGS_ERROR="$("$JQ" -r '.error // "tag_update_error"' "$WORK/tag-result.json" 2>/dev/null ||
+          printf '%s' tag_update_error)"
+    fi
+    "$JQ" --argjson changed "$TAG_UPDATED" --argjson tags_updated "$REMARKABLE_TAGS_UPDATED" \
+      --arg tags_error "$REMARKABLE_TAGS_ERROR" '
+      .+{skipped:false,tag_updated:$changed,remarkable_tags_updated:$tags_updated}
+      + (if $tags_error=="" then {} else {remarkable_tags_error:$tags_error} end)' \
+      "$WORK/import-result.json"
 }
 
 snapshot_sync_queue() {
@@ -228,7 +246,8 @@ sync_tagged() {
     while IFS= read -r key; do
         if [[ $stop == true ]]; then printf '%s\n' "$key" >>"$WORK/remaining.jsonl"; continue; fi
         key="$(printf '%s' "$key" | "$JQ" -r '.')"
-        ZOTBRIDGE_ACTIVITY_CHILD=true bash "$ROOT_DIR/scripts/zotbridge-shell.sh" sync-item --item-key "$key" \
+        ZOTBRIDGE_ACTIVITY_CHILD=true ZOTBRIDGE_ACTIVITY_PARENT_ACTION="$COMMAND" \
+          bash "$ROOT_DIR/scripts/zotbridge-shell.sh" sync-item --item-key "$key" \
           --tag "$QUEUE_TAG" --synced-tag "$SYNCED_TAG" --target-folder "$TARGET" \
           >"$WORK/one-result.json" &
         WORKER=$!

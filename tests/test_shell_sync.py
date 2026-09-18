@@ -190,6 +190,14 @@ class TaggedSyncTests(unittest.TestCase):
         second_metadata = json.loads((self.library / f"{self.second_document.decode()}.metadata").read_text())
         self.assertEqual(first_metadata["tags"], ["unread"])
         self.assertEqual(second_metadata.get("tags", []), [])
+        hits = [entry for entry in json.loads(
+            self.run_cli("activity-log").stdout)["entries"] if entry["event"] == "hit"]
+        self.assertEqual([(entry["action"], entry["item_key"], entry["filename"])
+                          for entry in hits], [
+            ("sync-tagged", "ITEM1234", "Paper.pdf"),
+            ("sync-tagged", "HOSTED12", "Paper.pdf"),
+            ("sync-tagged", "SECOND12", "Paper.pdf"),
+        ])
         status = self.assert_ok(self.run_cli("status", "--item-key", "HOSTED12"))
         self.assertEqual(status["mapping"]["rm_uuid"], self.document.decode())
         self.assertFalse(list(self.root.glob(".zotbridge-work.*")))
@@ -216,32 +224,30 @@ class TaggedSyncTests(unittest.TestCase):
         metadata = json.loads((self.library / f"{self.document.decode()}.metadata").read_text())
         self.assertEqual(metadata["tags"], ["café", "machine learning", "review", "updated"])
 
-    def test_unrepresentable_zotero_tag_retains_queue_tag(self):
+    def test_unrepresentable_zotero_tag_does_not_block_completion(self):
         self.seed([
             item("ITEM1234", tags=["to_sync", "bad;tag"]),
             item("HOSTED12", "attachment", parent="ITEM1234"),
         ])
         with self.broker_reply([self.folder, self.document], self.simulate):
-            result = self.run_cli("sync-tagged")
-        self.assertNotEqual(result.returncode, 0)
-        data = json.loads(result.stdout)
-        self.assertEqual(data["results"][0]["error"], "unsupported_tag")
+            result = self.assert_ok(self.run_cli("sync-tagged"))
+        self.assertEqual(result["results"][0]["remarkable_tags_error"], "unsupported_tag")
+        self.assertFalse(result["results"][0]["remarkable_tags_updated"])
         self.assertEqual(self.tags("ITEM1234"), [
-            {"tag": "to_sync", "type": 0}, {"tag": "bad;tag", "type": 0},
+            {"tag": "bad;tag", "type": 0}, {"tag": "synced", "type": 0},
         ])
 
-    def test_tag_update_failure_retains_queue_tag(self):
+    def test_tag_update_failure_does_not_block_completion(self):
         self.seed([
             item("ITEM1234", tags=["to_sync", "review"]),
             item("HOSTED12", "attachment", parent="ITEM1234"),
         ])
         with self.broker_reply([self.folder, self.document, b"FAILED"], self.simulate):
-            result = self.run_cli("sync-tagged")
-        self.assertNotEqual(result.returncode, 0)
-        data = json.loads(result.stdout)
-        self.assertEqual(data["results"][0]["error"], "tag_update_error")
+            data = self.assert_ok(self.run_cli("sync-tagged"))
+        self.assertEqual(data["results"][0]["remarkable_tags_error"], "tag_update_error")
+        self.assertFalse(data["results"][0]["remarkable_tags_updated"])
         self.assertEqual(self.tags("ITEM1234"), [
-            {"tag": "to_sync", "type": 0}, {"tag": "review", "type": 0},
+            {"tag": "review", "type": 0}, {"tag": "synced", "type": 0},
         ])
 
     def test_attachment_before_parent_also_reuses_same_pdf(self):

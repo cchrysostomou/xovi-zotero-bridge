@@ -29,9 +29,10 @@ RMAPI_PAIR_DRAFT=
 SEVEN_ZIP=
 
 activity_event() {
-    local event=$1 error=${2:-} tag=${3:-} count=${4:-} line=
+    local event=$1 error=${2:-} tag=${3:-} count=${4:-} item=${5:-${ITEM_KEY:-}}
+    local filename=${6:-} line= action=${ZOTBRIDGE_ACTIVITY_PARENT_ACTION:-$COMMAND}
     [[ $ACTIVITY_READY == true && $COMMAND != activity-log && $COMMAND != clear-activity-log &&
-       ${ZOTBRIDGE_ACTIVITY_CHILD:-false} != true ]] || return 0
+       (${ZOTBRIDGE_ACTIVITY_CHILD:-false} != true || $event == hit) ]] || return 0
     command -v flock >/dev/null && command -v mv >/dev/null && command -v tail >/dev/null ||
         return 0
     (
@@ -39,11 +40,12 @@ activity_event() {
         flock -n "$activity_lock" || exit 0
         [[ ! -L $ACTIVITY_LOG ]] || exit 0
         if [[ -e $ACTIVITY_LOG && ! -f $ACTIVITY_LOG ]]; then exit 0; fi
-        line="$("$JQ" -cn --arg action "$COMMAND" --arg event "$event" --arg error "$error" \
-          --arg item "${ITEM_KEY:-}" --arg tag "$tag" --arg count "$count" '
+        line="$("$JQ" -cn --arg action "$action" --arg event "$event" --arg error "$error" \
+          --arg item "$item" --arg filename "$filename" --arg tag "$tag" --arg count "$count" '
           {timestamp:(now|strftime("%Y-%m-%dT%H:%M:%SZ")),action:$action,event:$event}
           + (if $error=="" then {} else {error:$error} end)
           + (if $item=="" then {} else {item_key:$item} end)
+          + (if $filename=="" then {} else {filename:$filename} end)
           + (if $tag=="" then {} else {tag:$tag} end)
           + (if $count=="" then {} else {count:($count|tonumber)} end)')"
         if [[ -e $ACTIVITY_LOG ]] && (( $(wc -l <"$ACTIVITY_LOG") >= 200 )); then
@@ -341,7 +343,9 @@ print_activity_log() {
     fi
     "$JQ" -se '. as $entries |
       (all(.[]; type=="object" and (.timestamp|type=="string")
-        and (.action|type=="string") and (.event|IN("started","found","downloaded","completed","failed"))
+        and (.action|type=="string") and (.event|IN("started","found","hit","downloaded","completed","failed"))
+        and (if has("item_key") then .item_key|type=="string" else true end)
+        and (if has("filename") then .filename|type=="string" else true end)
         and (if has("tag") then .tag|type=="string" else true end)
         and (if has("count") then .count|type=="number" and .>=0 and floor==. else true end)
         and (if has("rm_uuid") then .rm_uuid|type=="string" else true end)
@@ -650,7 +654,7 @@ download_pdf() {
     [[ -n ${ATTACHMENT:-} ]] || resolve_attachment
     [[ -n $ATTACHMENT ]] || fail RuntimeError "No stored PDF attachment found for the item."
     if [[ $USE_WEBDAV == true ]]; then
-        metadata "items/$ATTACHMENT" "$WORK/attachment.json"
+        [[ -s $WORK/attachment.json ]] || metadata "items/$ATTACHMENT" "$WORK/attachment.json"
         local dav_url
         dav_url="$(get_config webdav_url)"
         request webdav "$dav_url$ATTACHMENT.zip" "$WORK/download.zip" "$MAX_BYTES" "$WEBDAV_TIMEOUT"

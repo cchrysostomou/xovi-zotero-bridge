@@ -399,11 +399,11 @@ download/import. Network failures can leave the write outcome unknown; the next
 run reconciles against the live tags. Uncertain broker imports are never retried
 automatically.
 
-Before writeback, the bridge adds every source tag except the configured queue
-tag to the imported reMarkable document, preserving tags already present there.
-The update is verified in local reMarkable metadata. A broker failure or a tag
-containing a comma, semicolon, or control character leaves the Zotero item queued
-instead of reporting a completed sync.
+After verified PDF import or mapping reuse, the bridge changes the Zotero queue
+tag to the completion tag. It then separately asks rm-librarian to add every
+other source tag to the reMarkable document while preserving existing tags.
+Tag propagation is best effort: failure is reported as `remarkable_tags_error`
+but does not undo or block Zotero completion.
 
 Batch output contains `ok`, `total`, `processed`, `synced`, `skipped`, `failed`,
 `remaining` (unprocessed keys), and per-source `results`. `synced` counts source
@@ -412,6 +412,10 @@ Partial failure exits nonzero. Item-specific failures can continue; shared
 network, permission, state or broker failures stop processing and report remaining
 keys. `sync-item` returns one result or a structured error. Use `status` to inspect
 retained import state after a writeback failure.
+
+The activity log records a `hit` entry for every queued source whose PDF resolves,
+including the Zotero source item key and the attachment's `.data.filename` read
+from the Zotero API.
 
 The tag-name cache is deliberately unchanged: the batch always queries live
 items, while `tags` keeps the agreed manual-refresh policy. Run

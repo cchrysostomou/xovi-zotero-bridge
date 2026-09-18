@@ -464,6 +464,8 @@ AFFECT [[12599552112012170435]]
                                             return event.timestamp + "  " + event.action + "  " +
                                               event.event + (event.tag ? " [" + event.tag + "]" : "") +
                                               (event.count !== undefined ? " " + event.count : "") +
+                                              (event.item_key ? " Zotero=" + event.item_key : "") +
+                                              (event.filename ? " file=\"" + event.filename + "\"" : "") +
                                               (event.rm_uuid ? " [" + event.rm_uuid + "]" : "") +
                                               (event.stage ? " stage=" + event.stage : "") +
                                               (event.error ? " (" + event.error + ")" : "") +
