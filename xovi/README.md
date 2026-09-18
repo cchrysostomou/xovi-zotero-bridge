@@ -79,7 +79,9 @@ used by reverse synchronization.
 
 The stored WebDAV password is never returned to QML: the page shows only its
 presence and an empty password field preserves it. Refresh tags and refresh-log
-buttons call the bridge asynchronously and display their JSON results.
+buttons call the bridge asynchronously and display their JSON results. The
+activity section provides **Refresh log** and **Clear log** controls; clearing
+also immediately empties the displayed event list.
 
 The Settings page loads cached tags on entry and provides **Refresh tags** for the
 explicit live refresh. All available Zotero tags appear in a bounded, scrollable

@@ -57,6 +57,8 @@ class ZoteroQuickSyncQmdTests(unittest.TestCase):
         self.assertIn('run(["settings-apply"])', content)
         self.assertIn('run(["tags", "--refresh", "--json"])', content)
         self.assertIn('run(["activity-log"])', content)
+        self.assertIn('run(["clear-activity-log"])', content)
+        self.assertIn('status = "Cleared " + result.cleared + " log events"', content)
         self.assertIn('run(["check-connection", "--webdav"])', content)
         self.assertIn('"rmapi-repair" : "rmapi-pair"', content)
         self.assertIn(".zotbridge-rmapi-pair-draft.json", content)

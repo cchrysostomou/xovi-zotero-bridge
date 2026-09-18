@@ -160,6 +160,9 @@ AFFECT [[12599552112012170435]]
                         } else if (result.entries) {
                             events = result.entries.slice().reverse();
                             status = "Loaded " + result.entries.length + " log events";
+                        } else if (result.cleared !== undefined) {
+                            events = [];
+                            status = "Cleared " + result.cleared + " log events";
                         } else {
                             status = "Bridge returned an unsupported response";
                         }
@@ -444,10 +447,18 @@ AFFECT [[12599552112012170435]]
                                 }
                             }
                             Text { text: "Recent bridge events"; font.pixelSize: 30; font.bold: true }
-                            Rectangle {
-                                width: 260; height: 64; color: bridgeSettings.busy ? "#aaaaaa" : "black"
-                                Text { anchors.centerIn: parent; text: "Refresh log"; color: "white"; font.pixelSize: 24 }
-                                MouseArea { anchors.fill: parent; enabled: !bridgeSettings.busy; onClicked: bridgeSettings.run(["activity-log"]) }
+                            Row {
+                                spacing: 20
+                                Rectangle {
+                                    width: 260; height: 64; color: bridgeSettings.busy ? "#aaaaaa" : "black"
+                                    Text { anchors.centerIn: parent; text: "Refresh log"; color: "white"; font.pixelSize: 24 }
+                                    MouseArea { anchors.fill: parent; enabled: !bridgeSettings.busy; onClicked: bridgeSettings.run(["activity-log"]) }
+                                }
+                                Rectangle {
+                                    width: 260; height: 64; color: bridgeSettings.busy ? "#aaaaaa" : "black"
+                                    Text { anchors.centerIn: parent; text: "Clear log"; color: "white"; font.pixelSize: 24 }
+                                    MouseArea { anchors.fill: parent; enabled: !bridgeSettings.busy; onClicked: bridgeSettings.run(["clear-activity-log"]) }
+                                }
                             }
                             Rectangle {
                                 width: parent.width; height: 300
