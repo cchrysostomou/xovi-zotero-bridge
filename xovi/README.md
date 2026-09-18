@@ -107,8 +107,9 @@ The forward phase reads live `to_sync` tags on both references and attachments. 
 reference selects its first stored PDF; a tagged attachment selects that exact
 PDF. Overlapping selections reuse the UUID mapping instead of importing twice.
 After a confirmed import, the backend changes only the source's `to_sync` tag to
-`synced`. It separately asks rm-librarian to add the source's other Zotero tags
-while preserving existing reMarkable tags; tag failure is reported but does not
+`synced`. It separately asks rm-librarian to add the source's other Zotero tags,
+plus two fixed marker tags, `zotero-import` and `unread`, while preserving
+existing reMarkable tags; tag failure is reported but does not
 block Zotero completion. Zotero API write permission is required.
 
 Each resolved forward-sync hit is written to the activity log with its queued

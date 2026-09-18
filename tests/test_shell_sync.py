@@ -170,10 +170,10 @@ class TaggedSyncTests(unittest.TestCase):
             item("SECOND12", "attachment", ["to_sync"], "ITEM1234"),
         ], page_size=1)
         with self.broker_reply([self.folder, self.document, b"ok",
-                                self.folder, self.second_document],
+                                self.folder, self.second_document, b"ok"],
                                self.simulate) as broker:
             result = self.assert_ok(self.run_cli("sync-tagged"))
-        self.assertEqual(len(broker), 5)
+        self.assertEqual(len(broker), 6)
         self.assertEqual((result["total"], result["synced"], result["failed"]), (3, 3, 0))
         self.assertTrue(result["results"][1]["already_imported"])
         self.assertEqual(result["results"][0]["rm_uuid"], result["results"][1]["rm_uuid"])
@@ -190,8 +190,8 @@ class TaggedSyncTests(unittest.TestCase):
         self.assertEqual(self.tags("HOSTED12"), [{"tag": "synced", "type": 0}])
         first_metadata = json.loads((self.library / f"{self.document.decode()}.metadata").read_text())
         second_metadata = json.loads((self.library / f"{self.second_document.decode()}.metadata").read_text())
-        self.assertEqual(first_metadata["tags"], ["unread"])
-        self.assertEqual(second_metadata.get("tags", []), [])
+        self.assertEqual(first_metadata["tags"], ["unread", "zotero-import"])
+        self.assertEqual(second_metadata.get("tags", []), ["unread", "zotero-import"])
         hits = [entry for entry in json.loads(
             self.run_cli("activity-log").stdout)["entries"] if entry["event"] == "hit"]
         self.assertEqual([(entry["action"], entry["item_key"], entry["filename"])
@@ -213,7 +213,8 @@ class TaggedSyncTests(unittest.TestCase):
             first = self.assert_ok(self.run_cli("sync-tagged"))
         self.assertEqual(first["synced"], 1)
         metadata = json.loads((self.library / f"{self.document.decode()}.metadata").read_text())
-        self.assertEqual(metadata["tags"], ["café", "machine learning", "review"])
+        self.assertEqual(metadata["tags"],
+                         ["café", "machine learning", "review", "unread", "zotero-import"])
 
         db = json.loads(self.db.read_text())
         db["items"]["ITEM1234"]["data"]["tags"] = [
@@ -224,7 +225,8 @@ class TaggedSyncTests(unittest.TestCase):
             second = self.assert_ok(self.run_cli("sync-item", "--item-key", "ITEM1234"))
         self.assertTrue(second["already_imported"])
         metadata = json.loads((self.library / f"{self.document.decode()}.metadata").read_text())
-        self.assertEqual(metadata["tags"], ["café", "machine learning", "review", "updated"])
+        self.assertEqual(metadata["tags"],
+                         ["café", "machine learning", "review", "unread", "updated", "zotero-import"])
 
     def test_unrepresentable_zotero_tag_does_not_block_completion(self):
         self.seed([
@@ -257,9 +259,9 @@ class TaggedSyncTests(unittest.TestCase):
             item("HOSTED12", "attachment", ["to_sync"], "ITEM1234"),
             item("ITEM1234", tags=["to_sync"]),
         ])
-        with self.broker_reply([self.folder, self.document], self.simulate) as requests:
+        with self.broker_reply([self.folder, self.document, b"ok"], self.simulate) as requests:
             result = self.assert_ok(self.run_cli("sync-tagged"))
-        self.assertEqual(len(requests), 2)
+        self.assertEqual(len(requests), 3)
         self.assertEqual(result["synced"], 2)
         self.assertTrue(result["results"][1]["already_imported"])
 

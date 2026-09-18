@@ -103,9 +103,11 @@ import_selected_pdf() {
 
 apply_source_tags() {
     local tags payload
-    "$JQ" -c --arg queue "$QUEUE_TAG" '[.data.tags[].tag | select(.!=$queue)] | unique' \
+    # Every import always carries these two fixed marker tags, in addition to
+    # the source's own non-queue Zotero tags.
+    "$JQ" -c --arg queue "$QUEUE_TAG" \
+      '[.data.tags[].tag | select(.!=$queue)] + ["zotero-import","unread"] | unique' \
       "$WORK/item.json" >"$WORK/source-tags.json"
-    "$JQ" -e 'length>0' "$WORK/source-tags.json" >/dev/null || return 0
     "$JQ" -c --slurpfile source "$WORK/source-tags.json" '
       [(.tags // [])[], $source[0][]] | unique' \
       "$LIBRARY/$DOCUMENT_UUID.metadata" >"$WORK/remarkable-tags.json" ||

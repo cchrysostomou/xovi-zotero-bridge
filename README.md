@@ -401,7 +401,8 @@ automatically.
 
 After verified PDF import or mapping reuse, the bridge changes the Zotero queue
 tag to the completion tag. It then separately asks rm-librarian to add every
-other source tag to the reMarkable document while preserving existing tags.
+other source tag to the reMarkable document, plus two fixed marker tags,
+`zotero-import` and `unread`, while preserving existing reMarkable tags.
 Tag propagation is best effort: failure is reported as `remarkable_tags_error`
 but does not undo or block Zotero completion.
 
