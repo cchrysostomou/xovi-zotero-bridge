@@ -32,7 +32,7 @@ activity_event() {
     local event=$1 error=${2:-} tag=${3:-} count=${4:-} item=${5:-${ITEM_KEY:-}}
     local filename=${6:-} line= action=${ZOTBRIDGE_ACTIVITY_PARENT_ACTION:-$COMMAND}
     [[ $ACTIVITY_READY == true && $COMMAND != activity-log && $COMMAND != clear-activity-log &&
-       (${ZOTBRIDGE_ACTIVITY_CHILD:-false} != true || $event == hit) ]] || return 0
+       (${ZOTBRIDGE_ACTIVITY_CHILD:-false} != true || $event == hit || $event == failed) ]] || return 0
     command -v flock >/dev/null && command -v mv >/dev/null && command -v tail >/dev/null ||
         return 0
     (
@@ -60,7 +60,7 @@ activity_event() {
 }
 
 fail() {
-    activity_event failed "$1"
+    activity_event failed "$1" "${QUEUE_TAG:-}" "" "${ITEM_KEY:-}" "${ZOTERO_FILENAME:-}"
     ACTIVITY_LOGGED=true
     if [[ -n $JQ ]]; then
         "$JQ" -cn --arg error "$1" --arg message "$2" '{ok:false,error:$error,message:$message}'
@@ -628,26 +628,40 @@ pdf_valid() {
       'sub("^[ \t\r\n\u000b\f]*";"") | startswith("%PDF-")' >/dev/null
 }
 extract_pdf() {
-    local help member expected
+    local help member expected format
     local -a options
-    help="$(unzip -h 2>&1 || :)"
-    case "$help" in
-        *BusyBox*) options=(-p) ;;
-        *UnZip*|*Info-ZIP*) options=(-p -P '') ;;
-        *) fail missing_dependency "PDF extraction requires BusyBox or Info-ZIP unzip." ;;
-    esac
-    limited_command 8388608 "$WORK/zip-list" unzip -l "$WORK/download.zip" < /dev/null ||
-        fail webdav_error "Cannot list WebDAV ZIP, or listing exceeds the size limit."
-    "$JQ" -Rse --slurpfile attachment "$WORK/attachment.json" --argjson limit "$MAX_BYTES" \
+    if [[ -n $SEVEN_ZIP ]]; then
+        format=7zz
+        options=(e -so -bd -y -spd)
+        limited_command 8388608 "$WORK/zip-list" "$SEVEN_ZIP" l -slt -ba "$WORK/download.zip" < /dev/null ||
+            fail archive_error "Cannot list the item's WebDAV ZIP, or its listing exceeds the size limit."
+    else
+        format=unzip
+        help="$(unzip -h 2>&1 || :)"
+        case "$help" in
+            *BusyBox*) options=(-p) ;;
+            *UnZip*|*Info-ZIP*) options=(-p -P '') ;;
+            *) fail missing_dependency "PDF extraction requires bundled 7zz, BusyBox or Info-ZIP unzip." ;;
+        esac
+        limited_command 8388608 "$WORK/zip-list" unzip -l "$WORK/download.zip" < /dev/null ||
+            fail archive_error "Cannot list the item's WebDAV ZIP, or its listing exceeds the size limit."
+    fi
+    "$JQ" -Rse --arg format "$format" --slurpfile attachment "$WORK/attachment.json" --argjson limit "$MAX_BYTES" \
       -f "$ROOT_DIR/scripts/zotbridge-shell-zip.jq" "$WORK/zip-list" >"$WORK/zip-selected.json" ||
-        fail webdav_error "WebDAV ZIP has an unsupported listing/name, duplicate entries, or no unique PDF within the size limit."
+        fail archive_error "The item's WebDAV ZIP has an unsupported listing/name, duplicate entries, or no unique PDF within the size limit."
     member="$("$JQ" -r '.raw' "$WORK/zip-selected.json")"
     expected="$("$JQ" -r '.size' "$WORK/zip-selected.json")"
     # Never extract archive paths into the filesystem or allow password prompts.
-    limited_command "$expected" "$WORK/document.pdf" unzip "${options[@]}" "$WORK/download.zip" "$member" < /dev/null ||
-        fail webdav_error "PDF extraction failed or exceeded its size bound; check for a corrupt or encrypted ZIP."
+    if [[ $format == 7zz ]]; then
+        limited_command "$expected" "$WORK/document.pdf" "$SEVEN_ZIP" "${options[@]}" \
+          "$WORK/download.zip" "$member" < /dev/null
+    else
+        limited_command "$expected" "$WORK/document.pdf" unzip "${options[@]}" \
+          "$WORK/download.zip" "$member" < /dev/null
+    fi ||
+        fail archive_error "The item's PDF extraction failed or exceeded its size bound; check for a corrupt or encrypted ZIP."
     [[ $(wc -c < "$WORK/document.pdf") -eq $expected ]] ||
-        fail webdav_error "Extracted PDF size does not match the ZIP listing."
+        fail archive_error "The item's extracted PDF size does not match the ZIP listing."
     rm -f -- "$WORK/download.zip"
 }
 download_pdf() {
@@ -679,7 +693,9 @@ download_pdf() {
     local title
     title="$("$JQ" -r --arg key "$ITEM_KEY" '
       (.data.title // $key)|tostring|gsub("^\\s+|\\s+$";"")
-      | gsub("[<>:\"/\\\\|?*\u0000-\u001f,]";"_")|gsub("^[ .]+|[ .]+$";"")
+      | gsub("</?(?:i|b|sub|sup|span)(?:\\s+[^>]*)?>";"";"i")
+      | gsub("[<>:\"/\\\\|?*\u0000-\u001f\u007f,]";"")
+      | gsub("\\s+";" ")|gsub("^[ .]+|[ .]+$";"")
       | explode | reduce .[] as $c ({s:"",n:0,full:false};
           ($c|[.]|implode) as $char | ($char|utf8bytelength) as $n
           | if .full or .n+$n>180 then .full=true else .s+=$char|.n+=$n end) | .s

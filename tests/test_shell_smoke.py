@@ -1037,7 +1037,7 @@ class ShellSmokeTests(unittest.TestCase):
                         archive.writestr(name, b"%PDF-1.7\nTest PDF\n")
                 result = self.run_cli("check-connection", "--item-key", "ITEM1234")
                 self.assertNotEqual(result.returncode, 0)
-                self.assertEqual(json.loads(result.stdout)["error"], "webdav_error")
+                self.assertEqual(json.loads(result.stdout)["error"], "archive_error")
 
     def test_busybox_rejects_oversized_and_corrupt_pdf(self):
         self.use_busybox()
@@ -1046,7 +1046,7 @@ class ShellSmokeTests(unittest.TestCase):
         with zipfile.ZipFile(self.archive, "w", zipfile.ZIP_DEFLATED) as archive:
             archive.writestr("Paper.pdf", b"%PDF-1.7\n" + b"x" * (1024 * 1024))
         large = self.run_cli("check-connection", "--item-key", "ITEM1234")
-        self.assertEqual(json.loads(large.stdout)["error"], "webdav_error")
+        self.assertEqual(json.loads(large.stdout)["error"], "archive_error")
         with zipfile.ZipFile(self.archive, "w", zipfile.ZIP_DEFLATED) as archive:
             archive.writestr("Paper.pdf", b"%PDF-1.7\nTest PDF\n" * 50)
             info = archive.getinfo("Paper.pdf")
@@ -1055,7 +1055,7 @@ class ShellSmokeTests(unittest.TestCase):
         self.archive.write_bytes(data)
         corrupt = self.run_cli("check-connection", "--item-key", "ITEM1234")
         self.assertNotEqual(corrupt.returncode, 0)
-        self.assertEqual(json.loads(corrupt.stdout)["error"], "webdav_error")
+        self.assertEqual(json.loads(corrupt.stdout)["error"], "archive_error")
 
 if __name__ == "__main__":
     unittest.main()

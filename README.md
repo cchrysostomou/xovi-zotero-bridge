@@ -413,6 +413,16 @@ network, permission, state or broker failures stop processing and report remaini
 keys. `sync-item` returns one result or a structured error. Use `status` to inspect
 retained import state after a writeback failure.
 
+Invalid, encrypted, ambiguous, corrupt, or oversized attachment archives are
+reported as per-item `archive_error` failures and do not stop later queue items.
+The failure log includes the Zotero source key and API attachment filename.
+Shared WebDAV connectivity or authentication failures still stop the batch.
+
+The imported reMarkable display name is derived from the Zotero item title.
+Supported inline Zotero markup is stripped, filesystem/protocol delimiters and
+control characters are removed, whitespace is normalized, and valid Unicode is
+preserved. The original ZIP member filename is not rewritten.
+
 The activity log records a `hit` entry for every queued source whose PDF resolves,
 including the Zotero source item key and the attachment's `.data.filename` read
 from the Zotero API.

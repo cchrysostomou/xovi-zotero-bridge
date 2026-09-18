@@ -85,7 +85,9 @@ elif "/items/" in url.path:
             item["data"]["tags"] = [t for t in item["data"]["tags"] if t["tag"] != "to_sync"]
         body = json.dumps(item).encode()
 elif url.path.endswith(".zip"):
-    body = Path(os.environ["FAKE_ARCHIVE"]).read_bytes()
+    key = url.path.rsplit("/", 1)[-1].removesuffix(".zip")
+    body = (b"not a zip" if db.get("bad_archive") == key
+            else Path(os.environ["FAKE_ARCHIVE"]).read_bytes())
 else:
     status, body = "404", b"Not found"
 db_path.write_text(json.dumps(db))
@@ -274,6 +276,16 @@ class TaggedSyncTests(unittest.TestCase):
         self.assertEqual(self.tags("ITEM1234"), [])
         self.assertEqual(self.tags("HOSTED12"), [])
 
+    def test_import_display_name_removes_markup_and_invalid_characters(self):
+        source = item("ITEM1234", tags=["to_sync"])
+        source["data"]["title"] = "<i>Alpha</i>: β / Study,?* 2026"
+        self.seed([source, item("HOSTED12", "attachment", parent="ITEM1234")])
+        with self.broker_reply([self.folder, self.document], self.simulate) as requests:
+            self.assert_ok(self.run_cli("sync-tagged"))
+        import_request = requests[1].decode()
+        self.assertIn("Alpha β Study 2026.pdf,", import_request)
+        self.assertNotIn("<i>", import_request)
+
     def test_tagged_reference_imports_first_pdf_and_does_not_tag_children(self):
         self.seed([
             item("ITEM1234", tags=["to_sync"]),
@@ -351,6 +363,28 @@ class TaggedSyncTests(unittest.TestCase):
         data = json.loads(result.stdout)
         self.assertEqual((data["failed"], data["synced"], data["remaining"]), (1, 1, []))
         self.assertEqual(self.tags("MISSING1"), [{"tag": "to_sync", "type": 0}])
+
+    def test_bad_archive_is_logged_and_next_item_continues(self):
+        self.seed([
+            item("HOSTED12", "attachment", ["to_sync"]),
+            item("SECOND12", "attachment", ["to_sync"]),
+        ], bad_archive="HOSTED12")
+        with self.broker_reply([self.folder, self.document], self.simulate):
+            result = self.run_cli("sync-tagged")
+        self.assertNotEqual(result.returncode, 0)
+        data = json.loads(result.stdout)
+        self.assertEqual((data["total"], data["processed"], data["synced"], data["failed"]),
+                         (2, 2, 1, 1))
+        self.assertEqual(data["remaining"], [])
+        self.assertEqual(data["results"][0]["error"], "archive_error")
+        self.assertEqual(self.tags("HOSTED12"), [{"tag": "to_sync", "type": 0}])
+        self.assertEqual(self.tags("SECOND12"), [{"tag": "synced", "type": 0}])
+        failures = [entry for entry in json.loads(
+            self.run_cli("activity-log").stdout)["entries"] if entry["event"] == "failed"]
+        self.assertTrue(any(entry.get("item_key") == "HOSTED12"
+                            and entry.get("filename") == "Paper.pdf"
+                            and entry.get("error") == "archive_error"
+                            for entry in failures))
 
     def test_queue_changes_between_pages_abort_before_import_or_write(self):
         self.seed([

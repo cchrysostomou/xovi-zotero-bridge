@@ -113,6 +113,9 @@ block Zotero completion. Zotero API write permission is required.
 
 Each resolved forward-sync hit is written to the activity log with its queued
 Zotero item key and the PDF attachment filename returned by the Zotero API.
+Attachment archive failures are logged per item and the batch continues with
+later queue entries. Imported display names remove unsupported delimiters,
+control characters, and inline Zotero markup while preserving valid Unicode.
 
 Imports use `default_target_folder` from `config.toml` (default `Zotero/unread`).
 ReMarkable library browsing and a destination picker are deferred from this MVP.

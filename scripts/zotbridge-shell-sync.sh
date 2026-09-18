@@ -262,7 +262,8 @@ sync_tagged() {
         "$JQ" -c --arg key "$key" '.+{item_key:$key}' "$WORK/one-result.json" >>"$WORK/results.jsonl"
         # Abort on shared infrastructure failures; item-specific failures can continue.
         if ((result != 0)) && "$JQ" -e '.error |
-          IN("unsupported_item","unsupported_tag","no_pdf","source_changed","write_conflict","verification_error") | not' \
+          IN("unsupported_item","unsupported_tag","archive_error","download_error",
+             "no_pdf","source_changed","write_conflict","verification_error") | not' \
           "$WORK/one-result.json" >/dev/null; then stop=true; fi
         [[ ! -e $MB_IN.zotbridge-pending ]] || stop=true
     done <"$WORK/queue.jsonl"
