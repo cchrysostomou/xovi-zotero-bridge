@@ -1,8 +1,13 @@
 # xovi integration notes
 
-The UI is a **Zotero Quick Settings action** plus a 3.28 Settings page, not an
-AppLoad app. It sits alongside the installed Bluetooth action without replacing
-that mod.
+The UI has three independent pieces:
+
+- a **Zotero Quick Settings action** for one-tap bidirectional sync
+- a **3.28 Settings page** for bridge configuration
+- an **AppLoad Zotero Library app** for browsing, filtering and importing papers
+
+They all reuse the same `/home/root/xovi-zotero-bridge/scripts/zotbridge-run.sh`
+backend commands; there is no separate AppLoad daemon or duplicated Zotero client.
 
 Reference: [quickSettingsBluetooth.qmd](https://github.com/rmitchellscott/xovi-qmd-extensions),
 with firmware-specific copies in `3.27` and `3.28`. They insert a native Quick
@@ -11,7 +16,8 @@ Settings control through QMLDiff and use `qt-command-executor`.
 ## Install
 
 This repository supplies the Quick Settings action for reMarkable OS/XOVI resource
-layouts **3.27** and **3.28**, plus a **3.28-only** Zotero Bridge Settings page:
+layouts **3.27** and **3.28**, a **3.28-only** Zotero Bridge Settings page, and a
+frontend-only AppLoad application:
 
 ```sh
 cat /etc/version
@@ -59,11 +65,12 @@ Windows PowerShell:
 .\scripts\update-remarkable.ps1
 ```
 
-It builds both public archives, transfers them through SSH as `root`, extracts
-the bridge runtime, and installs both 3.28 QMD files in
-`/home/root/xovi/exthome/qt-resource-rebuilder/`. The runtime archive contains
+It builds the public archives, transfers them through SSH as `root`, extracts
+the bridge runtime, installs both 3.28 QMD files in
+`/home/root/xovi/exthome/qt-resource-rebuilder/`, and installs the AppLoad app in
+`/home/root/xovi/exthome/appload/zotero-library/`. The runtime archive contains
 neither `config.toml` nor bridge state, so those files are not overwritten.
-Restart XOVI afterward to load the QMD changes.
+Restart XOVI afterward to load the QMD changes and AppLoad's app list.
 
 The 3.28 Settings app sidebar gains **Zotero Bridge**. It edits the WebDAV URL,
 username, password replacement, default reMarkable folder, and queue/completion
@@ -92,10 +99,10 @@ if they are identical.
 **Test Zotero connection** makes read-only Zotero metadata and WebDAV directory
 requests. It does not download a PDF, import a document, or modify Zotero/WebDAV.
 
-The backend entry point is:
+The Quick Settings backend entry point is:
 
 ```sh
-sh /home/root/xovi-zotero-bridge/scripts/zotbridge-run.sh sync-tagged
+sh /home/root/xovi-zotero-bridge/scripts/zotbridge-run.sh sync-all
 ```
 
 The Quick Settings button now invokes `sync-all`: it first exports and uploads
@@ -145,12 +152,49 @@ It records safe command/outcome/error-code events only—never credentials, requ
 URLs, titles, or error messages. Clear it with `clear-activity-log` after retaining
 any useful failure evidence.
 
-The Zotero browser (search, cached tags, pagination, long-press import) is a later
-UI. Its existing `list`, `tags`, `import` and `status` APIs remain available.
+## AppLoad Zotero Library app
+
+The AppLoad app lives in `xovi/appload/zotero-library/`. It is frontend-only QML
+with `manifest.json`, `icon.png`, and a compiled `resources.rcc`; it imports
+`net.asivery.CommandExecutor 1.0` and invokes existing bridge commands:
+
+```sh
+sh /home/root/xovi-zotero-bridge/scripts/zotbridge-run.sh tags --json
+sh /home/root/xovi-zotero-bridge/scripts/zotbridge-run.sh list --page-info --limit 8 --skip N --query TEXT --tag TAG
+sh /home/root/xovi-zotero-bridge/scripts/zotbridge-run.sh import --item-key KEY
+```
+
+The app shows a searchable Zotero library, cached/live tag filters, previous/next
+offset pagination and long-press-to-import rows. The `list --page-info` command
+does all filtering and pagination; the app only passes selected tags/query/offset
+and renders the returned JSON. Long-press import uses the existing `import`
+command, so mapping, duplicate checks, target folder behavior and broker safety
+remain centralized in the backend.
+
+To build only the AppLoad archive:
+
+```powershell
+.\scripts\package-xovi-appload.ps1
+```
+
+The package script uses a native `rcc` when available. If not, it can bootstrap a
+local WSL-only Qt `rcc` cache with `apt-get download`; no Qt files are committed
+or copied to the tablet. The resulting
+`dist\xovi-zotero-appload-app.zip` contains only:
+
+```text
+zotero-library/manifest.json
+zotero-library/icon.png
+zotero-library/resources.rcc
+```
+
+Extract that directory under `/home/root/xovi/exthome/appload/` if installing
+manually, then restart or refresh AppLoad so it rescans applications.
 
 Recommended runtime dependency for command execution from QML:
 - `qt-command-executor` xovi extension
 - `qt-resource-rebuilder` for the Quick Settings QMD patch
+- `rm-appload` for the Zotero Library app
 
 Recommended runtime dependency for library operations:
 - `rm-librarian`

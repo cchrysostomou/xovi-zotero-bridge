@@ -1,0 +1,10 @@
+{
+  "name": "Zotero Library",
+  "loadsBackend": false,
+  "entry": "/ui/ZoteroLibrary.qml",
+  "id": "zotero-library",
+  "supportsScaling": true,
+  "canHaveMultipleFrontends": false,
+  "aspectRatio": "original",
+  "width": "original"
+}

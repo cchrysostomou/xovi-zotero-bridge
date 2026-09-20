@@ -1,10 +1,22 @@
 from pathlib import Path
+import os
 import subprocess
 import unittest
 import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def run_powershell_script(script):
+    if os.name == "nt":
+        command = ["powershell", "-ExecutionPolicy", "Bypass", "-File", str(script)]
+        return subprocess.run(
+            command, check=True, cwd=ROOT, capture_output=True, text=True)
+    command = ["powershell.exe", "-ExecutionPolicy", "Bypass", "-File",
+               subprocess.check_output(["wslpath", "-w", str(script)],
+                                       text=True).strip()]
+    return subprocess.run(command, check=True, capture_output=True, text=True)
 
 
 class ZoteroQuickSyncQmdTests(unittest.TestCase):
@@ -34,11 +46,7 @@ class ZoteroQuickSyncQmdTests(unittest.TestCase):
         )
 
     def test_qmd_package_contains_only_installable_ui_files(self):
-        subprocess.run(
-            ["powershell", "-ExecutionPolicy", "Bypass", "-File",
-             str(ROOT / "scripts" / "package-xovi-quick-settings.ps1")],
-            check=True, cwd=ROOT, capture_output=True, text=True,
-        )
+        run_powershell_script(ROOT / "scripts" / "package-xovi-quick-settings.ps1")
         package = ROOT / "dist" / "xovi-zotero-quick-settings-qmd.zip"
         with zipfile.ZipFile(package) as archive:
             self.assertEqual(set(archive.namelist()), {
@@ -47,6 +55,39 @@ class ZoteroQuickSyncQmdTests(unittest.TestCase):
             })
             for name in archive.namelist():
                 self.assertNotIn("\r", archive.read(name).decode("utf-8"))
+            self.assertNotIn("config.toml", archive.namelist())
+
+    def test_appload_app_uses_existing_bridge_commands(self):
+        qml = (ROOT / "xovi" / "appload" / "zotero-library" / "ui" /
+               "ZoteroLibrary.qml").read_text()
+        manifest = (ROOT / "xovi" / "appload" / "zotero-library" /
+                    "manifest.json").read_text()
+        self.assertIn('"loadsBackend": false', manifest)
+        self.assertIn('"entry": "/ui/ZoteroLibrary.qml"', manifest)
+        self.assertIn("signal close", qml)
+        self.assertIn("function unloading()", qml)
+        self.assertIn("import net.asivery.CommandExecutor 1.0", qml)
+        self.assertIn("AsyncCommandExecutor", qml)
+        self.assertIn("/home/root/xovi-zotero-bridge/scripts/zotbridge-run.sh", qml)
+        self.assertIn('"list", "--page-info"', qml)
+        self.assertIn('"tags", "--refresh", "--json"', qml)
+        self.assertIn('"import", "--item-key"', qml)
+        self.assertIn("selectedTags", qml)
+        self.assertIn("pagination.next_skip", qml)
+        self.assertIn("onPressAndHold: app.importItem", qml)
+        self.assertNotIn("api_key", qml)
+        self.assertNotIn("webdav_password", qml)
+
+    def test_appload_package_contains_only_installable_app_files(self):
+        run_powershell_script(ROOT / "scripts" / "package-xovi-appload.ps1")
+        package = ROOT / "dist" / "xovi-zotero-appload-app.zip"
+        with zipfile.ZipFile(package) as archive:
+            self.assertEqual(set(archive.namelist()), {
+                "zotero-library/manifest.json",
+                "zotero-library/icon.png",
+                "zotero-library/resources.rcc",
+            })
+            self.assertGreater(len(archive.read("zotero-library/resources.rcc")), 1000)
             self.assertNotIn("config.toml", archive.namelist())
 
     def test_328_settings_page_uses_safe_bridge_contract(self):
@@ -103,10 +144,13 @@ class ZoteroQuickSyncQmdTests(unittest.TestCase):
         self.assertIn('$TargetHost = "192.168.1.33"', content)
         self.assertIn("package-tablet.ps1", content)
         self.assertIn("package-xovi-quick-settings.ps1", content)
+        self.assertIn("package-xovi-appload.ps1", content)
         self.assertIn('unzip -oq "$stage/xovi-zotero-library-aarch64.zip" -d "$bridge"', content)
         self.assertIn('"$bridge/bin/7zz"', content)
         self.assertIn('cp "$stage/qmd/3.28/zoteroQuickSync.qmd"', content)
         self.assertIn('cp "$stage/qmd/3.28/zoteroBridgeSettings.qmd"', content)
+        self.assertIn('unzip -oq "$stage/xovi-zotero-appload-app.zip" -d "$stage/appload"', content)
+        self.assertIn('cp -R "$stage/appload/zotero-library" "$appload/zotero-library"', content)
         self.assertNotIn('cp "$stage/config.toml"', content)
 
 

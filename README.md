@@ -518,7 +518,7 @@ its own result.
 
 Firmware-specific QMLDiff patches are in `xovi\3.27\zoteroQuickSync.qmd` and
 `xovi\3.28\zoteroQuickSync.qmd`. They add a stock download-icon button beside the
-existing Bluetooth Quick Settings action. The button invokes `sync-tagged` through
+existing Bluetooth Quick Settings action. The button invokes `sync-all` through
 `AsyncCommandExecutor`, disables itself during the operation, buffers JSON stdout
 until the process completes, and sends a compact success/partial-failure/failure
 toast. No credentials appear in the QMD patch.
@@ -529,6 +529,33 @@ See [`xovi/README.md`](xovi/README.md) for installation. Use only the patch matc
 `/home/root/xovi-zotero-bridge`. Do not close xochitl/XOVI while a batch runs:
 an interruption is recorded as an uncertain import rather than automatically
 retried. The button does not start a daemon or a detached background command.
+
+## AppLoad Zotero Library app
+
+The AppLoad app is in `xovi\appload\zotero-library`. It is a frontend-only QML
+application packaged as `manifest.json`, `icon.png`, and `resources.rcc`; it does
+not ship a second backend. The UI reuses the existing bridge commands:
+
+```sh
+sh scripts/zotbridge-run.sh tags --json
+sh scripts/zotbridge-run.sh list --page-info --limit 8 --skip 0 --query "attention" --tag unread
+sh scripts/zotbridge-run.sh import --item-key ABCD1234
+```
+
+This gives the app searchable tags, selected-tag filters, offset pagination and
+long-press import without duplicating Zotero API, mapping, duplicate-check or
+rm-librarian code. Build it with:
+
+```powershell
+.\scripts\package-xovi-appload.ps1
+```
+
+If Qt `rcc` is not installed on Windows, the packager uses WSL to download and
+extract the required Qt `rcc` packages into a local cache, then builds
+`dist\xovi-zotero-appload-app.zip`. The standard
+`.\scripts\update-remarkable.ps1` command installs that app to
+`/home/root/xovi/exthome/appload/zotero-library/` together with the runtime and
+QMD patches.
 
 ## Librarian folder probe
 

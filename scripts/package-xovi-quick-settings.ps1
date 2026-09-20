@@ -43,4 +43,4 @@ try {
 }
 
 Write-Output "Created $output"
-Write-Output "Contains only firmware-specific QMLDiff patches and installation instructions; no config, state, credentials, or backend runtime."
+Write-Output "Contains only firmware-specific QMLDiff patches and installation instructions; no config, state, credentials, backend runtime, or AppLoad app."

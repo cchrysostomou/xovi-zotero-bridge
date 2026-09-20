@@ -1,0 +1,5 @@
+<RCC>
+    <qresource>
+        <file>ui/ZoteroLibrary.qml</file>
+    </qresource>
+</RCC>
