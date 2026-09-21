@@ -527,8 +527,8 @@ Rectangle {
                     font.pixelSize: 24
                     selectByMouse: true
                     verticalAlignment: TextInput.AlignVCenter
-                    Keys.onReturnPressed: { app.loadPage(0); searchInput.focus = false; }
-                    Keys.onEnterPressed: { app.loadPage(0); searchInput.focus = false; }
+                    Keys.onReturnPressed: { app.loadPage(0); searchInput.focus = false; Qt.inputMethod.hide(); }
+                    Keys.onEnterPressed: { app.loadPage(0); searchInput.focus = false; Qt.inputMethod.hide(); }
                 }
             }
             Rectangle {
@@ -539,7 +539,7 @@ Rectangle {
                 MouseArea {
                     anchors.fill: parent
                     enabled: !app.busy
-                    onClicked: { app.loadPage(0); searchInput.focus = false; }
+                    onClicked: { app.loadPage(0); searchInput.focus = false; Qt.inputMethod.hide(); }
                 }
             }
         }
@@ -622,8 +622,8 @@ Rectangle {
                             font.pixelSize: 21
                             selectByMouse: true
                             verticalAlignment: TextInput.AlignVCenter
-                            Keys.onReturnPressed: tagSearch.focus = false
-                            Keys.onEnterPressed: tagSearch.focus = false
+                            Keys.onReturnPressed: { tagSearch.focus = false; Qt.inputMethod.hide(); }
+                            Keys.onEnterPressed: { tagSearch.focus = false; Qt.inputMethod.hide(); }
                         }
                     }
                     Rectangle {
@@ -734,8 +734,8 @@ Rectangle {
                             font.pixelSize: 21
                             selectByMouse: true
                             verticalAlignment: TextInput.AlignVCenter
-                            Keys.onReturnPressed: collectionSearch.focus = false
-                            Keys.onEnterPressed: collectionSearch.focus = false
+                            Keys.onReturnPressed: { collectionSearch.focus = false; Qt.inputMethod.hide(); }
+                            Keys.onEnterPressed: { collectionSearch.focus = false; Qt.inputMethod.hide(); }
                         }
                     }
                     Rectangle {

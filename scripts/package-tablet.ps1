@@ -98,6 +98,7 @@ try {
         @{ Path = $jq; Name = "bin/jq"; Binary = $true }
         @{ Path = $rmapi; Name = "bin/rmapi"; Binary = $true }
         @{ Path = $sevenZip; Name = "bin/7zz"; Binary = $true }
+        @{ Path = (Join-Path $root "xovi\assets\zotero-send-icon.png"); Name = "assets/zotero-send-icon.png"; Binary = $true }
     )
     foreach ($file in $runtimeFiles) {
         $files += @{ Path = (Join-Path $PSScriptRoot $file); Name = "scripts/" + $file; Binary = $false }

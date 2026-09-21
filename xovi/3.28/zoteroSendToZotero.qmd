@@ -1,0 +1,369 @@
+; xovi-zotero-bridge "Send to Zotero" reader toolbar button and upload dialog,
+; for the reMarkable 3.28 resource layout. Requires qt-resource-rebuilder,
+; qt-command-executor, and the bridge installed at /home/root/xovi-zotero-bridge.
+; Structural TRAVERSE/LOCATE targets and native-component property tokens below
+; are copied verbatim from the community-published, firmware-matched
+; touchLock.qmd (rmitchellscott/xovi-qmd-extensions) so this patch reuses only
+; confirmed-safe hash tokens for this firmware. Do not install on another
+; firmware layout. UNTESTED on-device; validate carefully before relying on it.
+; Ships its own glyph icon (xovi/assets/zotero-send-icon.png) instead of
+; guessing an unverified native icon-resource hash.
+
+; Add zoteroDialogVisible property and the reader toolbar button.
+AFFECT [[15738640198877654201]]
+    TRAVERSE [[8397993708429497603]]#[[6504254477]]
+        LOCATE BEFORE ALL
+        INSERT {
+            property ~&6503679477&~ zoteroDialogVisible: ~&214625660372&~
+        }
+
+        TRAVERSE [[6502786168]]#[[233745975898428]] > [[8398044571386570029]]
+            LOCATE BEFORE [[7712155293725601]][.[[8399878573055752961]]=[["3575461827597527778]]]
+            INSERT {
+                ~&454089850271038938&~ {
+                    ~&5972374&~: zoteroSendButton
+                    ~&233745975898428&~: ~&6504254477&~
+                    ~&6504337259&~: ~&454089850271038938&~.~&6503187275&~.~&14888501028015932088&~
+
+                    property ~&6503679477&~ _isExtensionButton: ~&6504329801&~
+                    ~&8399601734642709923&~: "file:///home/root/xovi-zotero-bridge/assets/zotero-send-icon.png"
+                    ~&233726547792244&~: !!~&7712934851008712&~ && ~&6504254477&~.~&4367731859579753176&~ > 7
+                    ~&233748328658231&~: !!~&7712934851008712&~ && ~&6504254477&~.~&4367731859579753176&~ > 7
+
+                    ~&254542253295368380&~: {
+                        ~&6504254477&~.zoteroDialogVisible = ~&6504329801&~;
+                    }
+                }
+            }
+        END TRAVERSE
+    END TRAVERSE
+END AFFECT
+
+; Settings menu entry when the toolbar is cramped (portrait).
+AFFECT [[15738640198877654202]]
+    TRAVERSE [[454089850271038938]]#[[6504254477]] > [[254480451320573660]]#[[16710723433319324941]] > [[14125623155555875541]]#[[233724020048228]]
+        LOCATE AFTER [[425121728314878811.15740235808997988493]]
+        INSERT {
+            ~&425121728314878811&~.~&432643201877711221&~ {
+                ~&214632764553&~: ~&6504222003&~("Send to Zotero")
+                ~&233748328658231&~: ~&6504254477&~.~&233745975898428&~.~&4367731859579753176&~ <= 7 &&
+                         ~&6504254477&~.~&233745975898428&~.~&14953652214069020552&~.~&14593461789319363686&~
+                ~&254542236275632405&~: {
+                    ~&6504254477&~.~&233745975898428&~.zoteroDialogVisible = ~&6504329801&~;
+                }
+            }
+        }
+    END TRAVERSE
+END AFFECT
+
+; More Tools menu entry when the toolbar is cramped (landscape).
+AFFECT [[15738640198877654203]]
+    TRAVERSE [[454089850271038938]]#[[6504254477]]
+        TRAVERSE [[14125623155555875541]]
+            LOCATE AFTER ALL
+            INSERT {
+                ~&425121728314878811&~.~&432643201877711221&~ {
+                    ~&214632764553&~: ~&6504222003&~("Send to Zotero")
+                    ~&233748328658231&~: ~&6504254477&~.~&233745975898428&~.~&4367731859579753176&~ <= 7 &&
+                             !~&6504254477&~.~&233745975898428&~.~&14953652214069020552&~.~&14593461789319363686&~
+                    ~&254542236275632405&~: {
+                        ~&6504254477&~.~&233745975898428&~.zoteroDialogVisible = ~&6504329801&~;
+                    }
+                }
+            }
+        END TRAVERSE
+    END TRAVERSE
+END AFFECT
+
+; Upload dialog overlay. Inserted at the same overlay anchor touchLock.qmd
+; uses for its full-screen touch-blocking rectangle. Everything below this
+; point is freshly authored QML (not a native compiled component), so it uses
+; plain property/type names rather than firmware-specific hash tokens.
+AFFECT [[15738640198877654204]]
+    IMPORT net.asivery.CommandExecutor [[180922.180921]]
+
+    TRAVERSE [[8397993708429497603]]#[[6504254477]] > [[6502786168]]#[[15549782143769420265]]
+        LOCATE BEFORE [[233704648923420]]
+        INSERT {
+            Rectangle {
+                id: zoteroSendDialog
+                anchors.fill: parent
+                z: 9999
+                color: "white"
+                visible: ~&6504254477&~.zoteroDialogVisible
+
+                property string docUuid: ""
+                property string statusText: "Send this document to Zotero."
+                property var tagsList: []
+                property var tagSelection: ({})
+                property string mode: "new"
+                property bool mapped: false
+                property string mappedTitle: ""
+                property string parentKey: ""
+                property var searchResults: []
+                property bool busy: false
+
+                MouseArea { anchors.fill: parent }
+
+                onVisibleChanged: {
+                    if (visible) {
+                        docUuid = !!~&7712934851008712&~ ? ~&7712934851008712&~.~&5972374&~ : "";
+                        mode = "new"; parentKey = ""; searchResults = []; tagSelection = ({});
+                        tagsList = []; mapped = false; mappedTitle = "";
+                        if (docUuid.length > 0) runStatus();
+                        else statusText = "No document is open.";
+                    }
+                }
+
+                AsyncCommandExecutor {
+                    id: zoteroDialogCommand
+                    command: "sh"
+                    property string output: ""
+                    property string errorOutput: ""
+                    property string pending: ""
+                    onStdOutAvailable: function(chunk) { output += chunk; }
+                    onStdErrAvailable: function(chunk) { errorOutput += chunk; }
+                    onRunningChanged: {
+                        if (!running && zoteroSendDialog.busy) zoteroSendDialog.finishCommand();
+                    }
+                }
+
+                function run(kind, arguments) {
+                    if (busy) return;
+                    busy = true;
+                    zoteroDialogCommand.pending = kind;
+                    zoteroDialogCommand.output = "";
+                    zoteroDialogCommand.errorOutput = "";
+                    zoteroDialogCommand.arguments = [
+                        "/home/root/xovi-zotero-bridge/scripts/zotbridge-run.sh"
+                    ].concat(arguments);
+                    if (!zoteroDialogCommand.startCommand(30000)) {
+                        busy = false;
+                        statusText = "Could not start bridge command.";
+                    }
+                }
+
+                function runStatus() {
+                    statusText = "Checking Zotero status\u2026";
+                    run("status", ["doc-status", "--uuid", docUuid]);
+                }
+
+                function runTags() {
+                    run("tags", ["doc-tags", "--uuid", docUuid]);
+                }
+
+                function runSearch(query) {
+                    if (query.length === 0) return;
+                    statusText = "Searching Zotero\u2026";
+                    run("search", ["list", "--query", query, "--json", "--limit", "10"]);
+                }
+
+                function submit() {
+                    if (mode === "attach" && parentKey.length !== 8) {
+                        statusText = "Choose a parent item to attach to.";
+                        return;
+                    }
+                    var chosenTags = [];
+                    for (var key in tagSelection) if (tagSelection[key]) chosenTags.push(key);
+                    var arguments = ["push-document", "--uuid", docUuid, "--mode", mode];
+                    if (mode === "attach") arguments = arguments.concat(["--parent-key", parentKey]);
+                    if (chosenTags.length > 0) arguments = arguments.concat(["--tags", chosenTags.join(",")]);
+                    statusText = "Sending to Zotero\u2026";
+                    run("push", arguments);
+                }
+
+                function finishCommand() {
+                    busy = false;
+                    var result;
+                    try { result = JSON.parse(zoteroDialogCommand.output); }
+                    catch (error) {
+                        statusText = "Bridge returned an invalid response.";
+                        return;
+                    }
+                    if (zoteroDialogCommand.exitCode !== 0 || result.ok !== true) {
+                        statusText = "Bridge error: " + (result.error || ("exit " + zoteroDialogCommand.exitCode));
+                        return;
+                    }
+                    var kind = zoteroDialogCommand.pending;
+                    if (kind === "status") {
+                        mapped = !!result.mapped;
+                        mappedTitle = result.zotero_item_title || "";
+                        mode = mapped ? "overwrite" : "new";
+                        runTags();
+                    } else if (kind === "tags") {
+                        tagsList = result.tags || [];
+                        var selection = ({});
+                        for (var i = 0; i < tagsList.length; i++) selection[tagsList[i]] = true;
+                        tagSelection = selection;
+                        statusText = mapped ?
+                            ("Already linked to \"" + mappedTitle + "\".") :
+                            "Not yet linked to Zotero. Choose how to send it.";
+                    } else if (kind === "search") {
+                        searchResults = Array.isArray(result) ? result : [];
+                        statusText = searchResults.length + " matching Zotero items.";
+                    } else if (kind === "push") {
+                        statusText = "Sent to Zotero.";
+                    }
+                }
+
+                Flickable {
+                    anchors.fill: parent
+                    anchors.margins: 40
+                    contentWidth: width
+                    contentHeight: form.height
+                    clip: true
+                    Column {
+                        id: form
+                        width: parent.width
+                        spacing: 16
+
+                        Text { text: "Send to Zotero"; font.pixelSize: 34; font.bold: true }
+                        Text {
+                            text: zoteroSendDialog.statusText
+                            font.pixelSize: 20; wrapMode: Text.WordWrap; width: parent.width
+                        }
+
+                        Row {
+                            spacing: 12
+                            visible: zoteroSendDialog.mapped
+                            Repeater {
+                                model: ["overwrite", "attach"]
+                                delegate: Rectangle {
+                                    width: 240; height: 56
+                                    color: zoteroSendDialog.mode === modelData ? "black" : "white"
+                                    border.width: 2; border.color: "black"
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: modelData === "overwrite" ? "Overwrite linked PDF" : "Attach new version"
+                                        color: zoteroSendDialog.mode === modelData ? "white" : "black"
+                                        font.pixelSize: 20
+                                    }
+                                    MouseArea { anchors.fill: parent; onClicked: zoteroSendDialog.mode = modelData }
+                                }
+                            }
+                        }
+                        Row {
+                            spacing: 12
+                            visible: !zoteroSendDialog.mapped
+                            Rectangle {
+                                width: 220; height: 56
+                                color: zoteroSendDialog.mode === "new" ? "black" : "white"
+                                border.width: 2; border.color: "black"
+                                Text {
+                                    anchors.centerIn: parent; text: "Create new item"
+                                    color: zoteroSendDialog.mode === "new" ? "white" : "black"; font.pixelSize: 20
+                                }
+                                MouseArea { anchors.fill: parent; onClicked: zoteroSendDialog.mode = "new" }
+                            }
+                            Rectangle {
+                                width: 240; height: 56
+                                color: zoteroSendDialog.mode === "attach" ? "black" : "white"
+                                border.width: 2; border.color: "black"
+                                Text {
+                                    anchors.centerIn: parent; text: "Attach to existing item"
+                                    color: zoteroSendDialog.mode === "attach" ? "white" : "black"; font.pixelSize: 20
+                                }
+                                MouseArea { anchors.fill: parent; onClicked: zoteroSendDialog.mode = "attach" }
+                            }
+                        }
+
+                        Text { text: "Search parent item"; font.pixelSize: 22; visible: zoteroSendDialog.mode === "attach" }
+                        TextInput {
+                            id: zoteroParentSearch
+                            visible: zoteroSendDialog.mode === "attach"
+                            width: parent.width; font.pixelSize: 24; selectByMouse: true
+                            Keys.onReturnPressed: { zoteroSendDialog.runSearch(text); focus = false; Qt.inputMethod.hide(); }
+                            Keys.onEnterPressed: { zoteroSendDialog.runSearch(text); focus = false; Qt.inputMethod.hide(); }
+                        }
+                        Rectangle {
+                            visible: zoteroSendDialog.mode === "attach"
+                            width: parent.width; height: 220
+                            color: "white"; border.width: 2; border.color: "black"
+                            Flickable {
+                                anchors.fill: parent; anchors.margins: 8; clip: true
+                                contentWidth: width; contentHeight: parentResults.height
+                                Column {
+                                    id: parentResults; width: parent.width
+                                    Repeater {
+                                        model: zoteroSendDialog.searchResults
+                                        delegate: Rectangle {
+                                            width: parentResults.width; height: 54
+                                            color: zoteroSendDialog.parentKey === modelData.item_key ? "#dddddd" : "white"
+                                            Text {
+                                                anchors.verticalCenter: parent.verticalCenter; x: 10
+                                                width: parent.width - 20; elide: Text.ElideRight
+                                                text: modelData.title; font.pixelSize: 20
+                                            }
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                onClicked: zoteroSendDialog.parentKey = modelData.item_key
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Text { text: "Tags"; font.pixelSize: 22 }
+                        Rectangle {
+                            width: parent.width; height: 160
+                            color: "white"; border.width: 2; border.color: "black"
+                            Flickable {
+                                anchors.fill: parent; anchors.margins: 8; clip: true
+                                contentWidth: width; contentHeight: tagList.height
+                                Column {
+                                    id: tagList; width: parent.width
+                                    Repeater {
+                                        model: zoteroSendDialog.tagsList
+                                        delegate: Rectangle {
+                                            width: tagList.width; height: 48; color: "white"
+                                            Row {
+                                                anchors.verticalCenter: parent.verticalCenter; x: 10; spacing: 10
+                                                Rectangle {
+                                                    width: 28; height: 28; border.width: 2; border.color: "black"
+                                                    color: zoteroSendDialog.tagSelection[modelData] ? "black" : "white"
+                                                }
+                                                Text { text: modelData; font.pixelSize: 20 }
+                                            }
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                onClicked: {
+                                                    var selection = zoteroSendDialog.tagSelection;
+                                                    selection[modelData] = !selection[modelData];
+                                                    zoteroSendDialog.tagSelection = Object.assign({}, selection);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Row {
+                            spacing: 20
+                            Rectangle {
+                                width: 220; height: 64
+                                color: zoteroSendDialog.busy ? "#aaaaaa" : "black"
+                                Text { anchors.centerIn: parent; text: "Send"; color: "white"; font.pixelSize: 24 }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    enabled: !zoteroSendDialog.busy
+                                    onClicked: zoteroSendDialog.submit()
+                                }
+                            }
+                            Rectangle {
+                                width: 160; height: 64
+                                color: "white"; border.width: 2; border.color: "black"
+                                Text { anchors.centerIn: parent; text: "Close"; font.pixelSize: 24 }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    onClicked: ~&6504254477&~.zoteroDialogVisible = ~&214625660372&~
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    END TRAVERSE
+END AFFECT

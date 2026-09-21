@@ -43,6 +43,33 @@ XOVI resource build: QMLDiff selectors are intentionally firmware-specific. Keep
 the existing Bluetooth QMD installed; the Zotero patch adds a separate button after
 the same anchor. To uninstall, remove only `zoteroQuickSync.qmd` and restart XOVI.
 
+## Reader "Send to Zotero" button (3.28 only, experimental/untested)
+
+`xovi/3.28/zoteroSendToZotero.qmd` adds a toolbar icon (falling back to a
+Settings/More Tools menu entry when the toolbar is cramped) to the document
+reader. Tapping it opens a full-screen dialog to send the open document to
+Zotero as a new item, a new version attached to an existing item, or an
+overwrite of the item it is already linked to, with reMarkable tags offered as
+checkboxes to include. It calls the existing `doc-status`, `doc-tags`, and
+`push-document` bridge commands and needs no new backend code.
+
+```sh
+cp xovi/3.28/zoteroSendToZotero.qmd \
+  /home/root/xovi/exthome/qt-resource-rebuilder/
+```
+
+`.\scripts\update-remarkable.ps1` installs this file automatically alongside
+the other two 3.28 QMD patches, and copies its glyph icon
+(`xovi/assets/zotero-send-icon.png`, a plain "Z" glyph, not a native firmware
+icon resource) to `/home/root/xovi-zotero-bridge/assets/`.
+
+This patch has **not** been validated on-device yet. Its toolbar/menu insertion
+points and native property tokens are copied from the community-published
+`touchLock.qmd` (matching this firmware build), but the button and dialog
+behavior themselves are new and should be tested carefully — ideally with a way
+to revert (remove the file and restart XOVI) if the reader toolbar or menus
+misbehave.
+
 The displayed Quick Settings icon is a circular **Z** badge. It inverts while the operation runs,
 and cannot be tapped again during that time. Xochitl's logging feedback reports
 start, completion counts, partial failure counts, launch failure, or invalid output.
