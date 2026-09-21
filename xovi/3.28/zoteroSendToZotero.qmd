@@ -10,7 +10,10 @@
 ; guessing an unverified native icon-resource hash.
 
 ; Add zoteroDialogVisible property and the reader toolbar button.
-AFFECT [[15738640198877654201]]
+; AFFECT id reused from touchLock.qmd/penLayerMemory.qmd: it identifies the
+; reader-root target type, not this file, and must match the firmware's
+; hashtab rather than being invented.
+AFFECT [[11313888899523275277]]
     TRAVERSE [[8397993708429497603]]#[[6504254477]]
         LOCATE BEFORE ALL
         INSERT {
@@ -40,7 +43,9 @@ AFFECT [[15738640198877654201]]
 END AFFECT
 
 ; Settings menu entry when the toolbar is cramped (portrait).
-AFFECT [[15738640198877654202]]
+; AFFECT id reused from touchLock.qmd/penLayerMemory.qmd for this same
+; Settings-menu target.
+AFFECT [[11704595946725378272]]
     TRAVERSE [[454089850271038938]]#[[6504254477]] > [[254480451320573660]]#[[16710723433319324941]] > [[14125623155555875541]]#[[233724020048228]]
         LOCATE AFTER [[425121728314878811.15740235808997988493]]
         INSERT {
@@ -57,7 +62,9 @@ AFFECT [[15738640198877654202]]
 END AFFECT
 
 ; More Tools menu entry when the toolbar is cramped (landscape).
-AFFECT [[15738640198877654203]]
+; AFFECT id reused from touchLock.qmd/penLayerMemory.qmd for this same
+; More-Tools-menu target.
+AFFECT [[6025599999262907645]]
     TRAVERSE [[454089850271038938]]#[[6504254477]]
         TRAVERSE [[14125623155555875541]]
             LOCATE AFTER ALL
@@ -79,7 +86,9 @@ END AFFECT
 ; uses for its full-screen touch-blocking rectangle. Everything below this
 ; point is freshly authored QML (not a native compiled component), so it uses
 ; plain property/type names rather than firmware-specific hash tokens.
-AFFECT [[15738640198877654204]]
+; AFFECT id reused from touchLock.qmd/penLayerMemory.qmd for this same
+; reader-root overlay-parent target.
+AFFECT [[1224665461898798997]]
     IMPORT net.asivery.CommandExecutor [[180922.180921]]
 
     TRAVERSE [[8397993708429497603]]#[[6504254477]] > [[6502786168]]#[[15549782143769420265]]
