@@ -57,15 +57,19 @@ def validate_item_key(item_key: str) -> None:
 @json_errors
 def list_items(
     query: str = typer.Option("", "--query", "-q"),
-    limit: int = typer.Option(20, "--limit", "-n", min=1, max=100),
+    limit: int | None = typer.Option(None, "--limit", "-n", min=1, max=100),
     as_json: bool = typer.Option(False, "--json"),
     skip: int = typer.Option(0, "--skip", "--start", min=0, max=2147483647),
     tag: list[str] | None = typer.Option(None, "--tag", "-t", help="Repeat to match any selected tag (OR)."),
+    collection: str | None = typer.Option(None, "--collection", "-c", help="Restrict to one collection key."),
     page_info: bool = typer.Option(False, "--page-info", help="Return JSON items and pagination information."),
 ) -> None:
     cfg = load_config()
+    if collection is not None and re.fullmatch(r"[A-Z0-9]{8}", collection) is None:
+        raise ValueError("collection must contain exactly eight uppercase letters or digits")
+    effective_limit = cfg.list_page_limit if limit is None else limit
     zot = ZoteroBridge(cfg.library_id, cfg.library_type, cfg.api_key, cfg.webdav)
-    page = zot.search_page(query, limit=limit, skip=skip, tags=tag)
+    page = zot.search_page(query, limit=effective_limit, skip=skip, tags=tag, collection=collection)
     state = StateStore(cfg.state_db_path)
 
     payload = [
@@ -74,6 +78,7 @@ def list_items(
             "title": p.title,
             "year": p.year,
             "has_pdf": p.has_pdf,
+            "num_children": p.num_children,
             "mapping": state.get_mapping(p.item_key),
             "attempt": state.get_attempt(p.item_key),
         }
@@ -94,7 +99,7 @@ def list_items(
         return
 
     for p in payload:
-        marker = "PDF" if p["has_pdf"] else "NO_PDF"
+        marker = f'files~{p["num_children"]}'
         typer.echo(f'{p["item_key"]}\t{marker}\t{p["year"]}\t{p["title"]}')
 
 
@@ -116,6 +121,31 @@ def tags(
         f"{cfg.library_type}:{cfg.library_id}", query, fetch, refresh,
     )
     typer.echo(json.dumps(names) if as_json else "\n".join(names))
+
+
+@app.command("collections")
+@json_errors
+def collections(
+    as_json: bool = typer.Option(False, "--json"),
+    refresh: bool = typer.Option(
+        False, "--refresh", help="Replace cached collections from Zotero; otherwise reuse them."
+    ),
+) -> None:
+    """List top-level collections, caching them per library until explicitly refreshed."""
+    cfg = load_config()
+
+    def fetch() -> list[dict]:
+        zot = ZoteroBridge(cfg.library_id, cfg.library_type, cfg.api_key, cfg.webdav)
+        return [{"key": c.key, "name": c.name} for c in zot.list_collections()]
+
+    entries = JsonStateStore(cfg.state_json_path).collections(
+        f"{cfg.library_type}:{cfg.library_id}", fetch, refresh,
+    )
+    if as_json:
+        typer.echo(json.dumps(entries))
+    else:
+        for entry in entries:
+            typer.echo(f'{entry["key"]}\t{entry["name"]}')
 
 
 @app.command("clear-mappings")
@@ -143,16 +173,38 @@ def ensure_folder(
     }))
 
 
+@app.command("children")
+@json_errors
+def children(
+    item_key: str = typer.Option(..., "--item-key"),
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """List an item's downloadable stored PDF attachments."""
+    validate_item_key(item_key)
+    cfg = load_config()
+    zot = ZoteroBridge(cfg.library_id, cfg.library_type, cfg.api_key, cfg.webdav)
+    attachments = zot.list_pdf_attachments(item_key)
+    payload = [{"attachment_key": a.attachment_key, "title": a.title} for a in attachments]
+    if as_json:
+        typer.echo(json.dumps({"ok": True, "item_key": item_key, "attachments": payload}))
+        return
+    for a in payload:
+        typer.echo(f'{a["attachment_key"]}\t{a["title"]}')
+
+
 @app.command("import")
 @json_errors
 def import_item(
     item_key: str = typer.Option(..., "--item-key"),
+    attachment_key: str | None = typer.Option(None, "--attachment-key"),
     target_folder: str | None = typer.Option(None, "--target-folder"),
     retry_uncertain: bool = typer.Option(
         False, "--retry-uncertain", help="Retry an unconfirmed import; may create a duplicate."
     ),
 ) -> None:
     validate_item_key(item_key)
+    if attachment_key is not None:
+        validate_item_key(attachment_key)
     cfg = load_config()
     target_folder = cfg.default_target_folder if target_folder is None else target_folder
     with import_lock(Path(cfg.state_db_path).with_suffix(".lock")):
@@ -168,14 +220,19 @@ def import_item(
             )
         zot = ZoteroBridge(cfg.library_id, cfg.library_type, cfg.api_key, cfg.webdav)
         librarian = LibrarianBridge(cfg.mb_in_path, cfg.mb_out_path, cfg.broker_timeout_s)
-        with zot.download_first_pdf(item_key) as (temp_path, attachment_key):
+        downloader = (
+            zot.download_attachment(item_key, attachment_key)
+            if attachment_key is not None
+            else zot.download_first_pdf(item_key)
+        )
+        with downloader as (temp_path, resolved_attachment_key):
             folder_uuid = librarian.ensure_folder(target_folder)
-            state.begin_import(item_key, attachment_key, target_folder)
+            state.begin_import(item_key, resolved_attachment_key, target_folder)
             rm_uuid = librarian.import_document(str(temp_path), folder_uuid)
             RemarkableLibrary(cfg.xochitl_dir).verify_import(rm_uuid, folder_uuid)
             state.upsert_mapping(
                 zotero_item_key=item_key,
-                zotero_attachment_key=attachment_key,
+                zotero_attachment_key=resolved_attachment_key,
                 rm_uuid=rm_uuid,
                 rm_path=target_folder,
                 state="imported",
@@ -186,7 +243,7 @@ def import_item(
                         "ok": True,
                         "already_imported": False,
                         "item_key": item_key,
-                        "attachment_key": attachment_key,
+                        "attachment_key": resolved_attachment_key,
                         "rm_uuid": rm_uuid,
                         "rm_path": target_folder,
                     }

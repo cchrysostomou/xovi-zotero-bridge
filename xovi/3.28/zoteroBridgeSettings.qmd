@@ -145,6 +145,7 @@ AFFECT [[12599552112012170435]]
                             reverseFolderInput.text = result.reverse_sync_folder || "Zotero/Read";
                             queueTag = result.sync_queue_tag || "";
                             syncedTag = result.sync_synced_tag || "";
+                            listPageLimitInput.text = String(result.list_page_limit || 8);
                             passwordHint.text = result.webdav.password_set ?
                                 "Password stored; leave blank to keep it" : "No password stored";
                             status = result.applied ? "Settings saved" : "Settings loaded";
@@ -169,6 +170,9 @@ AFFECT [[12599552112012170435]]
                     }
 
                     function saveSettings() {
+                        var parsedLimit = parseInt(listPageLimitInput.text, 10);
+                        if (isNaN(parsedLimit)) parsedLimit = 8;
+                        parsedLimit = Math.max(1, Math.min(100, parsedLimit));
                         var draft = {
                             version: 1,
                             webdav_url: urlInput.text,
@@ -176,7 +180,8 @@ AFFECT [[12599552112012170435]]
                             default_target_folder: folderInput.text,
                             reverse_sync_folder: reverseFolderInput.text,
                             sync_queue_tag: queueTag,
-                            sync_synced_tag: syncedTag
+                            sync_synced_tag: syncedTag,
+                            list_page_limit: parsedLimit
                         };
                         if (passwordInput.text.length > 0) draft.webdav_password = passwordInput.text;
                         var request = new XMLHttpRequest();
@@ -242,6 +247,18 @@ AFFECT [[12599552112012170435]]
                             Text { id: passwordHint; font.pixelSize: 18 }
                             Text { text: "reMarkable folder path"; font.pixelSize: 22 }
                             TextInput { id: folderInput; width: parent.width; font.pixelSize: 24; selectByMouse: true }
+                            Rectangle { width: parent.width; height: 2; color: "black" }
+                            Text { text: "List page size (1-100)"; font.pixelSize: 22 }
+                            TextInput {
+                                id: listPageLimitInput
+                                width: parent.width; font.pixelSize: 24; selectByMouse: true
+                                text: "8"
+                                maximumLength: 3
+                                onTextChanged: {
+                                    var digitsOnly = text.replace(/[^0-9]/g, "");
+                                    if (digitsOnly !== text) text = digitsOnly;
+                                }
+                            }
                             Rectangle { width: parent.width; height: 2; color: "black" }
                             Text { text: "Queue tag"; font.pixelSize: 22 }
                             Rectangle {

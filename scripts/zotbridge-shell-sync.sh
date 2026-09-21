@@ -72,7 +72,7 @@ import_selected_pdf() {
         "$JQ" --arg key "$ITEM_KEY" '{ok:true,already_imported:true,item_key:$key,
           attachment_key:.zotero_attachment_key,rm_uuid:.rm_uuid,rm_path:.rm_path}' \
           "$WORK/mapping.json" >"$WORK/import-result.json"
-        [[ $COMMAND == sync-item ]] || "$JQ" '.' "$WORK/import-result.json"
+        [[ $COMMAND =~ ^(sync-item|import)$ ]] || "$JQ" '.' "$WORK/import-result.json"
         return
     fi
     if [[ $RETRY != true ]] && "$JQ" -e --arg scope "$LIBRARY_SCOPE" --arg key "$ITEM_KEY" \
@@ -98,7 +98,7 @@ import_selected_pdf() {
     "$JQ" -cn --arg item "$ITEM_KEY" --arg attachment "$ATTACHMENT" --arg uuid "$DOCUMENT_UUID" --arg path "$TARGET" \
       '{ok:true,already_imported:false,item_key:$item,attachment_key:$attachment,rm_uuid:$uuid,rm_path:$path}' \
       >"$WORK/import-result.json"
-    [[ $COMMAND == sync-item ]] || "$JQ" '.' "$WORK/import-result.json"
+    [[ $COMMAND =~ ^(sync-item|import)$ ]] || "$JQ" '.' "$WORK/import-result.json"
 }
 
 apply_source_tags() {
@@ -108,6 +108,31 @@ apply_source_tags() {
     "$JQ" -c --arg queue "$QUEUE_TAG" \
       '[.data.tags[].tag | select(.!=$queue)] + ["zotero-import","unread"] | unique' \
       "$WORK/item.json" >"$WORK/source-tags.json"
+    "$JQ" -c --slurpfile source "$WORK/source-tags.json" '
+      [(.tags // [])[], $source[0][]] | unique' \
+      "$LIBRARY/$DOCUMENT_UUID.metadata" >"$WORK/remarkable-tags.json" ||
+      fail tag_verification_error "The imported document metadata could not be read before setting its tags."
+    "$JQ" -e '
+      all(.[]; type=="string" and length>0
+          and (contains(";") or contains(",") or test("[\u0000-\u001f\u007f]") | not))' \
+      "$WORK/remarkable-tags.json" >/dev/null ||
+      fail unsupported_tag "A tag cannot be represented through rm-librarian because it is empty or contains a comma, semicolon, or control character."
+    tags="$("$JQ" -c '.tags // [] | unique' "$LIBRARY/$DOCUMENT_UUID.metadata")" ||
+      fail tag_verification_error "The imported document metadata could not be read before setting its tags."
+    [[ $tags != "$(<"$WORK/remarkable-tags.json")" ]] || return 0
+    payload="$("$JQ" -r 'join(";")' "$WORK/remarkable-tags.json")"
+    broker setTags "$DOCUMENT_UUID,$payload" optional
+    [[ $BROKER_REPLY == ok ]] ||
+      fail tag_update_error "rm-librarian did not confirm the reMarkable tag update."
+}
+
+apply_selected_tags() {
+    local tags payload
+    "$JQ" -c --argjson include "$INCLUDE_ZOTERO_TAGS" --argjson unread "$ADD_UNREAD_TAG" '
+      ((if $include then [.data.tags[]?.tag] else [] end)
+       + (if $unread then ["unread"] else [] end)) | unique' \
+      "$WORK/item.json" >"$WORK/source-tags.json"
+    "$JQ" -e 'length>0' "$WORK/source-tags.json" >/dev/null || return 0
     "$JQ" -c --slurpfile source "$WORK/source-tags.json" '
       [(.tags // [])[], $source[0][]] | unique' \
       "$LIBRARY/$DOCUMENT_UUID.metadata" >"$WORK/remarkable-tags.json" ||

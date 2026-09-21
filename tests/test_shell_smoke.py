@@ -53,17 +53,33 @@ path = urlsplit(url).path
 parameters = parse_qs(urlsplit(url).query)
 start = int(parameters.get("start", ["0"])[0])
 limit = int(parameters.get("limit", ["100"])[0])
-data = {"key":"ITEM1234","data":{"key":"ITEM1234","itemType":"journalArticle","title":"Test Paper","date":"2024"}}
+data = {"key":"ITEM1234","data":{"key":"ITEM1234","itemType":"journalArticle","title":"Test Paper","date":"2024",
+    "tags":[{"tag":"important"}]}}
 attachment = {"key":"HOSTED12","data":{"key":"HOSTED12","itemType":"attachment",
     "parentItem":"ITEM1234","contentType":"application/pdf","linkMode":"imported_file","filename":"Paper.pdf"}}
 status = "200"
 total = 1
-if path.endswith("/items/top"):
-    total = int(os.environ.get("FAKE_ITEM_TOTAL", "1"))
+if re.search(r"/collections/[A-Z0-9]{8}/items/top$", path):
+    total = int(os.environ.get("FAKE_COLLECTION_ITEM_TOTAL", "1"))
     items = []
     for i in range(start, min(start + limit, total)):
         key = "ITEM1234" if i == 0 else f"ITEM{i:04}"
-        items.append({"key":key,"data":dict(data["data"],key=key)})
+        items.append({"key":key,"data":dict(data["data"],key=key),"meta":{"numChildren":1}})
+    body = json.dumps(items).encode()
+elif path.endswith("/collections/top"):
+    total = int(os.environ.get("FAKE_COLLECTION_TOTAL", "2"))
+    prefix = os.environ.get("FAKE_COLLECTION_PREFIX", "Folder")
+    collections = [{"key":f"COL{i:05d}","data":{"key":f"COL{i:05d}","name":f"{prefix} {i}"}}
+                   for i in range(start, min(start + limit, total))]
+    if start >= int(os.environ.get("FAKE_COLLECTION_FAILURE_START", "999999")): status = "500"
+    body = json.dumps(collections).encode()
+elif path.endswith("/items/top"):
+    total = int(os.environ.get("FAKE_ITEM_TOTAL", "1"))
+    num_children = int(os.environ.get("FAKE_ITEM_NUM_CHILDREN", "1"))
+    items = []
+    for i in range(start, min(start + limit, total)):
+        key = "ITEM1234" if i == 0 else f"ITEM{i:04}"
+        items.append({"key":key,"data":dict(data["data"],key=key),"meta":{"numChildren":num_children}})
     body = json.dumps(items).encode()
 elif re.search(r"/items/ITEM[A-Z0-9]{4}/children$", path):
     body = json.dumps([attachment]).encode()
@@ -254,11 +270,13 @@ class ShellSmokeTests(unittest.TestCase):
         self.assertNotIn("password-secret", settings.stdout)
         self.assertEqual(public["sync_queue_tag"], "to_sync")
         self.assertEqual(public["reverse_sync_folder"], "Zotero/Read")
+        self.assertEqual(public["list_page_limit"], 8)
         self.assertEqual(public["rmapi"], {"installed": False, "paired": False})
         draft = self.root / ".zotbridge-settings-draft.json"
         draft.write_text(json.dumps({
             "version": 1, "webdav_url": "https://next.example/files",
             "webdav_username": "next-user", "default_target_folder": "Zotero/ready",
+            "list_page_limit": 25,
             "reverse_sync_folder": "Zotero/Read and annotated",
             "sync_queue_tag": "waiting", "sync_synced_tag": "complete",
         }))
@@ -268,6 +286,7 @@ class ShellSmokeTests(unittest.TestCase):
         self.assertTrue(data["applied"])
         self.assertEqual(data["webdav"]["url"], "https://next.example/files/")
         self.assertTrue(data["webdav"]["password_set"])
+        self.assertEqual(data["list_page_limit"], 25)
         self.assertFalse(draft.exists())
         saved = self.config.read_text()
         self.assertIn('webdav_password = "password-secret"', saved)
@@ -440,8 +459,26 @@ class ShellSmokeTests(unittest.TestCase):
         data = json.loads(result.stdout)
         self.assertEqual(data[0]["item_key"], "ITEM1234")
         self.assertTrue(data[0]["has_pdf"])
+        self.assertEqual(data[0]["num_children"], 1)
         self.assertIsNone(data[0]["mapping"])
         self.assertIsNone(data[0]["attempt"])
+
+    def test_has_pdf_uses_numchildren_without_a_children_request(self):
+        result = self.run_cli("list", "--limit", "5", "--json")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        requests = [json.loads(line) for line in self.requests.read_text().splitlines()]
+        self.assertFalse(any(request["path"].endswith("/children") for request in requests))
+        self.env["FAKE_ITEM_NUM_CHILDREN"] = "0"
+        result = self.run_cli("list", "--limit", "5", "--json")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(json.loads(result.stdout)[0]["has_pdf"])
+        self.assertEqual(json.loads(result.stdout)[0]["num_children"], 0)
+
+    def test_list_plain_text_shows_estimated_file_item_count_not_pdf_marker(self):
+        result = self.run_cli("list", "--limit", "5")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("files~1", result.stdout)
+        self.assertNotIn("PDF", result.stdout)
 
     def test_list_needs_no_unzip_head_stat_or_broker_tools(self):
         for tool in ("unzip", "head", "stat", "od", "flock", "mv", "sleep"):
@@ -476,6 +513,36 @@ class ShellSmokeTests(unittest.TestCase):
                 requests = [json.loads(line) for line in self.requests.read_text().splitlines()]
                 request = [r for r in requests if r["path"].endswith("/items/top")][-1]
                 self.assertEqual(parse_qs(request["query"])["tag"], [expression])
+
+    def test_default_list_limit_comes_from_config_and_collection_filters_endpoint(self):
+        from urllib.parse import parse_qs
+        result = self.run_cli("list", "--json")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        request = json.loads(self.requests.read_text().splitlines()[-1])
+        self.assertEqual(request["path"], "/users/123/items/top")
+        self.assertEqual(parse_qs(request["query"])["limit"], ["8"])
+        self.config.write_text(self.config.read_text() + 'list_page_limit = 42\n')
+        result = self.run_cli("list", "--json")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        request = json.loads(self.requests.read_text().splitlines()[-1])
+        self.assertEqual(parse_qs(request["query"])["limit"], ["42"])
+        override = self.run_cli("list", "--limit", "3", "--json")
+        self.assertEqual(override.returncode, 0, override.stdout + override.stderr)
+        request = json.loads(self.requests.read_text().splitlines()[-1])
+        self.assertEqual(parse_qs(request["query"])["limit"], ["3"])
+        collection = self.run_cli("list", "--collection", "COLLECTA", "--json")
+        self.assertEqual(collection.returncode, 0, collection.stdout + collection.stderr)
+        requests = [json.loads(line) for line in self.requests.read_text().splitlines()]
+        self.assertEqual(requests[-1]["path"], "/users/123/collections/COLLECTA/items/top")
+        invalid = self.run_cli("list", "--collection", "bad-key")
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertEqual(json.loads(invalid.stdout)["error"], "ValueError")
+
+    def test_invalid_list_page_limit_configuration_is_rejected(self):
+        self.config.write_text(self.config.read_text() + 'list_page_limit = 0\n')
+        result = self.run_cli("list", "--json")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(json.loads(result.stdout)["error"], "configuration_error")
 
     def test_pages_advance_then_end_and_keep_filtered_total(self):
         self.env["FAKE_ITEM_TOTAL"] = "3"
@@ -636,6 +703,51 @@ class ShellSmokeTests(unittest.TestCase):
             self.fail("Python must read the shell cache without fetching")
         self.assertEqual(store.tags("user:123", "", unexpected_fetch), json.loads(refreshed.stdout))
 
+    def test_collections_fetch_and_cache_across_pages(self):
+        self.env["FAKE_COLLECTION_TOTAL"] = "150"
+        result = self.run_cli("collections", "--json")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        names = json.loads(result.stdout)
+        self.assertEqual(len(names), 150)
+        self.assertEqual(names[0], {"key": "COL00000", "name": "Folder 0"})
+        requests = [json.loads(line) for line in self.requests.read_text().splitlines()]
+        self.assertEqual(len(requests), 2)
+        original = self.requests.read_bytes()
+        self.env["FAKE_METADATA_STATUS"] = "401"
+        cached = self.run_cli("collections", "--json")
+        self.assertEqual(cached.returncode, 0, cached.stdout + cached.stderr)
+        self.assertEqual(json.loads(cached.stdout), names)
+        self.assertEqual(self.requests.read_bytes(), original)
+        del self.env["FAKE_METADATA_STATUS"]
+        self.env["FAKE_COLLECTION_PREFIX"] = "Fresh"
+        refreshed = self.run_cli("collections", "--refresh", "--json")
+        self.assertEqual(refreshed.returncode, 0, refreshed.stdout + refreshed.stderr)
+        self.assertEqual(json.loads(refreshed.stdout)[0], {"key": "COL00000", "name": "Fresh 0"})
+        stored = json.loads((self.root / "state.db.json").read_text())
+        self.assertEqual(stored["collection_cache"]["user:123"]["collections"], json.loads(refreshed.stdout))
+
+    def test_collection_cache_corruption_is_not_silently_reset(self):
+        state = self.root / "state.db.json"
+        for contents in ('{"version":1,"mappings":{},"attempts":{},"collection_cache":{"user:123":1}}',
+                         '{"version":1,"mappings":{},"attempts":{},"collection_cache":null}'):
+            with self.subTest(contents=contents):
+                state.write_text(contents)
+                result = self.run_cli("collections", "--refresh", "--json")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(json.loads(result.stdout)["error"], "state_error")
+                self.assertEqual(state.read_text(), contents)
+        self.assertFalse(self.requests.exists())
+
+    def test_python_and_shell_share_the_same_collection_cache(self):
+        from zotbridge.json_state import JsonStateStore
+        store = JsonStateStore(str(self.root / "state.db.json"))
+        store.collections("user:123", lambda: [{"key": "COLLECTA", "name": "Papers"}])
+        self.env["FAKE_METADATA_STATUS"] = "401"
+        result = self.run_cli("collections", "--json")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout), [{"key": "COLLECTA", "name": "Papers"}])
+        self.assertFalse(self.requests.exists())
+
     def test_invalid_offsets_and_tag_expressions(self):
         for args in (("list", "--skip", "-1"), ("list", "--skip", "2147483648"),
                      ("list", "--tag", ""), ("list", "--tag", "one||two")):
@@ -705,6 +817,7 @@ class ShellSmokeTests(unittest.TestCase):
             "ok": True, "library_type": "user", "library_id": "123", "cleared": 1,
         })
         del original["mappings"]["e90be5e8-32f6-46ec-bb75-32d827af9eee"]
+        original["collection_cache"] = {}
         self.assertEqual(json.loads(state.read_text()), original)
         self.assertEqual(document.read_bytes(), b"%PDF-1.7\n")
         unchanged = state.read_bytes()
@@ -944,6 +1057,60 @@ class ShellSmokeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(requests[0], b">eensureFolder:Manual/inbox\n")
 
+    def test_children_lists_only_downloadable_pdf_attachments(self):
+        result = self.run_cli("children", "--item-key", "ITEM1234", "--json")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(result.stdout)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["item_key"], "ITEM1234")
+        self.assertEqual(data["attachments"], [{"attachment_key": "HOSTED12", "title": "Paper.pdf"}])
+
+    def test_import_with_explicit_attachment_key_and_selected_tags(self):
+        self.prepare_import()
+        with self.config.open("a") as config:
+            config.write('default_target_folder = "Research/unread"\n')
+
+        def on_request(request):
+            self.simulate_import(request)
+            if request.startswith(b">esetTags:"):
+                payload = request.decode().strip().split(":", 1)[1]
+                _, tags_csv = payload.split(",", 1)
+                path = self.library / f"{self.document.decode()}.metadata"
+                metadata = json.loads(path.read_text())
+                metadata["tags"] = tags_csv.split(";")
+                path.write_text(json.dumps(metadata))
+
+        with self.broker_reply([self.folder, self.document, b"ok"], on_request) as requests:
+            result = self.run_cli(
+                "import", "--item-key", "ITEM1234", "--attachment-key", "HOSTED12",
+                "--include-zotero-tags", "--add-unread-tag",
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data["attachment_key"], "HOSTED12")
+        self.assertTrue(data["remarkable_tags_updated"])
+        self.assertEqual(len(requests), 3)
+        self.assertTrue(requests[2].startswith(b">esetTags:" + self.document))
+        tags = requests[2].decode().strip().split(",", 1)[1].split(";")
+        self.assertEqual(set(tags), {"important", "unread"})
+
+    def test_import_without_tag_flags_does_not_call_settags(self):
+        self.prepare_import()
+        with self.config.open("a") as config:
+            config.write('default_target_folder = "Research/unread"\n')
+        with self.broker_reply([self.folder, self.document], self.simulate_import) as requests:
+            result = self.run_cli("import", "--item-key", "ITEM1234", "--attachment-key", "HOSTED12")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(result.stdout)
+        self.assertFalse(data["remarkable_tags_updated"])
+        self.assertEqual(len(requests), 2)
+
+    def test_import_rejects_attachment_key_not_belonging_to_item(self):
+        self.prepare_import()
+        result = self.run_cli("import", "--item-key", "ITEM1234", "--attachment-key", "BADKEY99")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(json.loads(result.stdout)["error"], "zotero_error")
+
     def test_unconfirmed_import_blocks_repeat_and_reports_status(self):
         self.prepare_import()
         with self.broker_reply([self.folder, None], self.simulate_import):
@@ -1056,6 +1223,146 @@ class ShellSmokeTests(unittest.TestCase):
         corrupt = self.run_cli("check-connection", "--item-key", "ITEM1234")
         self.assertNotEqual(corrupt.returncode, 0)
         self.assertEqual(json.loads(corrupt.stdout)["error"], "archive_error")
+
+    def setup_library_document(self, uuid, name="Test Paper", parent="", tags=None, deleted=False):
+        self.library = self.root / "library"
+        self.library.mkdir(exist_ok=True)
+        if "xochitl_dir" not in self.config.read_text():
+            with self.config.open("a") as config:
+                config.write(f'xochitl_dir = "{self.library}"\n')
+        metadata = {"type": "DocumentType", "parent": parent, "visibleName": name,
+                    "deleted": deleted}
+        if tags is not None:
+            metadata["tags"] = tags
+        (self.library / f"{uuid}.metadata").write_text(json.dumps(metadata))
+
+    def install_stub_rmapi_and_seven_zip(self):
+        rmapi = self.bin / "rmapi"
+        rmapi.write_text("#!/bin/sh\nexit 1\n")
+        rmapi.chmod(0o755)
+        self.env["ZOTBRIDGE_RMAPI"] = str(rmapi)
+        seven_zip = self.bin / "7zz"
+        seven_zip.write_text("#!/bin/sh\nexit 1\n")
+        seven_zip.chmod(0o755)
+        self.env["ZOTBRIDGE_7ZZ"] = str(seven_zip)
+
+    def test_doc_status_reports_unmapped_document(self):
+        uuid = "cc4c1d9d-a04a-4f6e-bb08-d6f54cde88b8"
+        result = self.run_cli("doc-status", "--uuid", uuid)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"ok": True, "rm_uuid": uuid, "mapped": False})
+
+    def test_doc_status_reports_mapped_document_with_zotero_title(self):
+        uuid = "cc4c1d9d-a04a-4f6e-bb08-d6f54cde88b8"
+        state = self.root / "state.db.json"
+        state.write_text(json.dumps({
+            "version": 1, "mappings": {uuid: {
+                "zotero_library_type": "user", "zotero_library_id": "123",
+                "zotero_item_key": "ITEM1234", "zotero_attachment_key": "HOSTED12",
+                "rm_path": "Research/unread", "updated_at": "2026-01-01 00:00:00"}},
+            "attempts": {}, "tag_cache": {}, "collection_cache": {}}))
+        result = self.run_cli("doc-status", "--uuid", uuid)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(result.stdout)
+        self.assertTrue(data["mapped"])
+        self.assertEqual(data["zotero_item_key"], "ITEM1234")
+        self.assertEqual(data["zotero_attachment_key"], "HOSTED12")
+        self.assertEqual(data["zotero_item_title"], "Test Paper")
+
+    def test_doc_status_rejects_invalid_uuid(self):
+        result = self.run_cli("doc-status", "--uuid", "not-a-uuid")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(json.loads(result.stdout)["error"], "ValueError")
+
+    def test_doc_tags_reads_remarkable_metadata_tags(self):
+        uuid = "cc4c1d9d-a04a-4f6e-bb08-d6f54cde88b8"
+        self.setup_library_document(uuid, tags=["important", "unread"])
+        result = self.run_cli("doc-tags", "--uuid", uuid)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data["ok"], True)
+        self.assertEqual(data["rm_uuid"], uuid)
+        self.assertEqual(sorted(data["tags"]), ["important", "unread"])
+
+    def test_doc_tags_rejects_missing_or_deleted_document(self):
+        uuid = "cc4c1d9d-a04a-4f6e-bb08-d6f54cde88b8"
+        self.library = self.root / "library"
+        self.library.mkdir()
+        with self.config.open("a") as config:
+            config.write(f'xochitl_dir = "{self.library}"\n')
+        missing = self.run_cli("doc-tags", "--uuid", uuid)
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertEqual(json.loads(missing.stdout)["error"], "FileNotFoundError")
+        self.setup_library_document(uuid, deleted=True)
+        deleted = self.run_cli("doc-tags", "--uuid", uuid)
+        self.assertNotEqual(deleted.returncode, 0)
+        self.assertEqual(json.loads(deleted.stdout)["error"], "FileNotFoundError")
+
+    def test_push_document_validates_mode_and_related_options(self):
+        uuid = "cc4c1d9d-a04a-4f6e-bb08-d6f54cde88b8"
+        cases = [
+            (["--uuid", uuid, "--mode", "bogus"], "ValueError"),
+            (["--uuid", uuid, "--mode", "attach"], "ValueError"),
+            (["--uuid", uuid, "--mode", "new", "--parent-key", "ITEM1234"], "ValueError"),
+            (["--uuid", uuid, "--mode", "attach", "--parent-key", "ITEM1234",
+              "--collection", "COLL1234"], "ValueError"),
+            (["--uuid", uuid, "--mode", "new", "--tags", "bad,tag,"], "ValueError"),
+            (["--uuid", "not-a-uuid", "--mode", "new"], "ValueError"),
+        ]
+        for args, expected_error in cases:
+            with self.subTest(args=args):
+                result = self.run_cli("push-document", *args)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(json.loads(result.stdout)["error"], expected_error)
+
+    def test_push_document_reports_missing_dependency_then_missing_document(self):
+        uuid = "cc4c1d9d-a04a-4f6e-bb08-d6f54cde88b8"
+        missing_rmapi = self.run_cli("push-document", "--uuid", uuid, "--mode", "new")
+        self.assertNotEqual(missing_rmapi.returncode, 0)
+        self.assertEqual(json.loads(missing_rmapi.stdout), {
+            "ok": False, "rm_uuid": uuid, "stage": "configuration",
+            "error": "missing_dependency", "retained_in_source": True,
+        })
+        self.install_stub_rmapi_and_seven_zip()
+        self.library = self.root / "library"
+        self.library.mkdir()
+        with self.config.open("a") as config:
+            config.write(f'xochitl_dir = "{self.library}"\n')
+        not_found = self.run_cli("push-document", "--uuid", uuid, "--mode", "new")
+        self.assertNotEqual(not_found.returncode, 0)
+        self.assertEqual(json.loads(not_found.stdout), {
+            "ok": False, "rm_uuid": uuid, "stage": "locate",
+            "error": "document_not_found", "retained_in_source": True,
+        })
+
+    def test_push_document_overwrite_without_mapping_is_reported_precisely(self):
+        uuid = "cc4c1d9d-a04a-4f6e-bb08-d6f54cde88b8"
+        self.setup_library_document(uuid, name="Test Paper")
+        pdf_source = self.root / "source.pdf"
+        pdf_source.write_bytes(b"%PDF-1.7\nTest PDF\n")
+        rmapi = self.bin / "rmapi"
+        rmapi.write_text(
+            "#!/bin/sh\n"
+            "if [ \"$1\" = \"-json\" ] && [ \"$2\" = \"ls\" ]; then "
+            f"printf '[{{\"id\":\"{uuid}\",\"name\":\"Test Paper\",\"type\":\"DocumentType\"}}]\\n'; "
+            "exit 0; fi\n"
+            "if [ \"$1\" = \"geta\" ]; then "
+            f"cp {pdf_source} \"./Test Paper.pdf\"; exit 0; fi\n"
+            "exit 1\n"
+        )
+        rmapi.chmod(0o755)
+        self.env["ZOTBRIDGE_RMAPI"] = str(rmapi)
+        seven_zip = self.bin / "7zz"
+        seven_zip.write_text("#!/bin/sh\nexit 1\n")
+        seven_zip.chmod(0o755)
+        self.env["ZOTBRIDGE_7ZZ"] = str(seven_zip)
+        (self.root / ".rmapi").write_text('{"usertoken":"secret"}\n')
+        result = self.run_cli("push-document", "--uuid", uuid, "--mode", "overwrite")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(json.loads(result.stdout), {
+            "ok": False, "rm_uuid": uuid, "stage": "resolve",
+            "error": "not_mapped", "retained_in_source": True,
+        })
 
 if __name__ == "__main__":
     unittest.main()

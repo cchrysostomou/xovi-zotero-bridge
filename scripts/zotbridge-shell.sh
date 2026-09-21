@@ -123,8 +123,9 @@ else
 fi
 
 if [[ ${1:-} == --help || ${1:-} == -h || $# == 0 ]]; then
-    printf '%s\n' 'Usage: zotbridge-run.sh list [--query TEXT] [--tag NAME ...] [--limit 1..100] [--skip N] [--json] [--page-info]' \
+    printf '%s\n' 'Usage: zotbridge-run.sh list [--query TEXT] [--tag NAME ...] [--collection KEY] [--limit 1..100] [--skip N] [--json] [--page-info]' \
       '       zotbridge-run.sh tags [--query TEXT] [--json] [--refresh]' \
+      '       zotbridge-run.sh collections [--json] [--refresh]' \
       '       zotbridge-run.sh clear-mappings' \
       '       zotbridge-run.sh settings [--json]' \
       '       zotbridge-run.sh settings-apply' \
@@ -133,48 +134,69 @@ if [[ ${1:-} == --help || ${1:-} == -h || $# == 0 ]]; then
       '       zotbridge-run.sh rmapi-repair' \
       '       zotbridge-run.sh activity-log' \
       '       zotbridge-run.sh clear-activity-log' \
-      '       zotbridge-run.sh import --item-key KEY [--target-folder PATH] [--retry-uncertain]' \
+      '       zotbridge-run.sh children --item-key KEY [--json]' \
+      '       zotbridge-run.sh import --item-key KEY [--attachment-key KEY] [--target-folder PATH] [--retry-uncertain] [--include-zotero-tags] [--add-unread-tag]' \
       '       zotbridge-run.sh sync-tagged [--tag to_sync] [--synced-tag synced] [--target-folder PATH]' \
       '       zotbridge-run.sh reverse-sync' \
       '       zotbridge-run.sh sync-all' \
       '       zotbridge-run.sh sync-item --item-key KEY [--tag to_sync] [--synced-tag synced] [--target-folder PATH]' \
       '       zotbridge-run.sh status --item-key KEY' \
       '       zotbridge-run.sh ensure-folder --target-folder PATH' \
-      '       zotbridge-run.sh check-connection [--webdav] [--item-key KEY]'
+      '       zotbridge-run.sh check-connection [--webdav] [--item-key KEY]' \
+      '       zotbridge-run.sh doc-status --uuid RM_UUID' \
+      '       zotbridge-run.sh doc-tags --uuid RM_UUID' \
+      '       zotbridge-run.sh push-document --uuid RM_UUID --mode new|attach|overwrite [--parent-key KEY] [--collection KEY] [--tags a,b,c]'
     exit 0
 fi
 COMMAND=$1
 shift
-QUERY= LIMIT=20 SKIP=0 AS_JSON=false PAGE_INFO=false ITEM_KEY= TARGET= RETRY=false
+QUERY= LIMIT= LIMIT_GIVEN=false SKIP=0 AS_JSON=false PAGE_INFO=false ITEM_KEY= TARGET= RETRY=false
 TARGET_GIVEN=false
 REFRESH=false
+COLLECTION=
 QUEUE_TAG=
 SYNCED_TAG=
 QUEUE_TAG_SET=false
 SYNCED_TAG_SET=false
+ATTACHMENT_KEY_OPT=
+INCLUDE_ZOTERO_TAGS=false
+ADD_UNREAD_TAG=false
 TAGS=()
+UUID_OPT=
+PUSH_MODE=
+PUSH_PARENT_KEY=
+PUSH_TAGS_RAW=
+PUSH_TAGS=()
 while (($#)); do
     case "$1" in
         --query|-q) [[ $COMMAND =~ ^(list|tags)$ && $# -ge 2 ]] || fail ValueError "Invalid --query option."; QUERY=$2; shift 2 ;;
-        --limit|-n) [[ $COMMAND == list && $# -ge 2 ]] || fail ValueError "Invalid --limit option."; LIMIT=$2; shift 2 ;;
+        --limit|-n) [[ $COMMAND == list && $# -ge 2 ]] || fail ValueError "Invalid --limit option."; LIMIT=$2; LIMIT_GIVEN=true; shift 2 ;;
         --skip|--start) [[ $COMMAND == list && $# -ge 2 ]] || fail ValueError "Invalid --skip option."; SKIP=$2; shift 2 ;;
         --tag|-t)
             [[ $COMMAND =~ ^(list|sync-tagged|sync-item)$ && $# -ge 2 ]] || fail ValueError "Invalid --tag option."
             if [[ $COMMAND == list ]]; then TAGS+=("$2"); else QUEUE_TAG=$2; QUEUE_TAG_SET=true; fi
             shift 2 ;;
+        --collection|-c) [[ $COMMAND =~ ^(list|push-document)$ && $# -ge 2 ]] || fail ValueError "Invalid --collection option."; COLLECTION=$2; shift 2 ;;
         --synced-tag) [[ $COMMAND =~ ^sync-(tagged|item)$ && $# -ge 2 ]] || fail ValueError "Invalid --synced-tag option."; SYNCED_TAG=$2; SYNCED_TAG_SET=true; shift 2 ;;
         --page-info) [[ $COMMAND == list ]] || fail ValueError "Invalid --page-info option."; PAGE_INFO=true; shift ;;
-        --json) [[ $COMMAND =~ ^(list|tags|settings)$ ]] || fail ValueError "Invalid --json option."; AS_JSON=true; shift ;;
-        --refresh) [[ $COMMAND == tags ]] || fail ValueError "--refresh is only supported by tags."; REFRESH=true; shift ;;
-        --item-key) [[ $COMMAND =~ ^(import|status|check-connection|sync-item)$ && $# -ge 2 ]] || fail ValueError "Invalid --item-key option."; ITEM_KEY=$2; shift 2 ;;
+        --json) [[ $COMMAND =~ ^(list|tags|collections|settings|children)$ ]] || fail ValueError "Invalid --json option."; AS_JSON=true; shift ;;
+        --refresh) [[ $COMMAND =~ ^(tags|collections)$ ]] || fail ValueError "--refresh is only supported by tags and collections."; REFRESH=true; shift ;;
+        --item-key) [[ $COMMAND =~ ^(import|status|check-connection|sync-item|children)$ && $# -ge 2 ]] || fail ValueError "Invalid --item-key option."; ITEM_KEY=$2; shift 2 ;;
+        --attachment-key) [[ $COMMAND == import && $# -ge 2 ]] || fail ValueError "Invalid --attachment-key option."; ATTACHMENT_KEY_OPT=$2; shift 2 ;;
         --target-folder) [[ $COMMAND =~ ^(import|ensure-folder|sync-tagged|sync-item)$ && $# -ge 2 ]] || fail ValueError "Invalid --target-folder option."; TARGET=$2; TARGET_GIVEN=true; shift 2 ;;
         --webdav) [[ $COMMAND == check-connection ]] || fail ValueError "Invalid --webdav option."; CHECK_WEBDAV=true; shift ;;
         --retry-uncertain) [[ $COMMAND == import ]] || fail ValueError "Invalid --retry-uncertain option."; RETRY=true; shift ;;
+        --include-zotero-tags) [[ $COMMAND == import ]] || fail ValueError "Invalid --include-zotero-tags option."; INCLUDE_ZOTERO_TAGS=true; shift ;;
+        --add-unread-tag) [[ $COMMAND == import ]] || fail ValueError "Invalid --add-unread-tag option."; ADD_UNREAD_TAG=true; shift ;;
+        --uuid) [[ $COMMAND =~ ^(doc-status|doc-tags|push-document)$ && $# -ge 2 ]] || fail ValueError "Invalid --uuid option."; UUID_OPT=$2; shift 2 ;;
+        --mode) [[ $COMMAND == push-document && $# -ge 2 ]] || fail ValueError "Invalid --mode option."; PUSH_MODE=$2; shift 2 ;;
+        --parent-key) [[ $COMMAND == push-document && $# -ge 2 ]] || fail ValueError "Invalid --parent-key option."; PUSH_PARENT_KEY=$2; shift 2 ;;
+        --tags) [[ $COMMAND == push-document && $# -ge 2 ]] || fail ValueError "Invalid --tags option."; PUSH_TAGS_RAW=$2; shift 2 ;;
         *) fail ValueError "Unknown command option. Use --help." ;;
     esac
 done
-[[ $COMMAND =~ ^(list|tags|clear-mappings|settings|settings-apply|rmapi-status|rmapi-pair|rmapi-repair|activity-log|clear-activity-log|check-connection|ensure-folder|import|status|library|sync-tagged|sync-item|reverse-sync|sync-all)$ ]] || fail ValueError "Unknown command. Use --help."
-if [[ $COMMAND == tags || $COMMAND == clear-mappings ]]; then
+[[ $COMMAND =~ ^(list|tags|collections|clear-mappings|settings|settings-apply|rmapi-status|rmapi-pair|rmapi-repair|activity-log|clear-activity-log|check-connection|ensure-folder|import|status|library|sync-tagged|sync-item|reverse-sync|sync-all|children|doc-status|doc-tags|push-document)$ ]] || fail ValueError "Unknown command. Use --help."
+if [[ $COMMAND == tags || $COMMAND == collections || $COMMAND == clear-mappings ]]; then
     for dependency in flock mv; do
         command -v "$dependency" >/dev/null || fail missing_dependency "JSON state operations require utility: $dependency."
     done
@@ -186,13 +208,45 @@ if [[ $COMMAND == ensure-folder || $COMMAND == import || $COMMAND == sync-* || $
     done
     sleep 0.01 || fail missing_dependency "Folder operations require sleep with fractional-second support."
 fi
-[[ $LIMIT =~ ^[0-9]{1,3}$ ]] && ((10#$LIMIT >= 1 && 10#$LIMIT <= 100)) || fail ValueError "limit must be from 1 to 100."
-LIMIT=$((10#$LIMIT))
+if [[ $LIMIT_GIVEN == true ]]; then
+    [[ $LIMIT =~ ^[0-9]{1,3}$ ]] && ((10#$LIMIT >= 1 && 10#$LIMIT <= 100)) || fail ValueError "limit must be from 1 to 100."
+    LIMIT=$((10#$LIMIT))
+fi
 [[ $SKIP =~ ^[0-9]{1,10}$ ]] && ((10#$SKIP <= 2147483647)) ||
     fail ValueError "skip must be from 0 to 2147483647."
 SKIP=$((10#$SKIP))
-if [[ -n $ITEM_KEY || $COMMAND == import || $COMMAND == status || $COMMAND == sync-item ]]; then
+if [[ -n $ITEM_KEY || $COMMAND == import || $COMMAND == status || $COMMAND == sync-item || $COMMAND == children ]]; then
     [[ $ITEM_KEY =~ ^[A-Z0-9]{8}$ ]] || fail ValueError "item-key must contain exactly eight uppercase letters or digits."
+fi
+[[ -z $ATTACHMENT_KEY_OPT ]] || [[ $ATTACHMENT_KEY_OPT =~ ^[A-Z0-9]{8}$ ]] ||
+    fail ValueError "attachment-key must contain exactly eight uppercase letters or digits."
+[[ -z $COLLECTION ]] || [[ $COLLECTION =~ ^[A-Z0-9]{8}$ ]] ||
+    fail ValueError "collection must contain exactly eight uppercase letters or digits."
+if [[ $COMMAND =~ ^(doc-status|doc-tags|push-document)$ ]]; then
+    [[ $UUID_OPT =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]] ||
+        fail ValueError "uuid must be a canonical reMarkable document UUID."
+    UUID_OPT=${UUID_OPT,,}
+fi
+if [[ $COMMAND == push-document ]]; then
+    [[ $PUSH_MODE =~ ^(new|attach|overwrite)$ ]] || fail ValueError "mode must be new, attach or overwrite."
+    if [[ $PUSH_MODE == attach ]]; then
+        [[ $PUSH_PARENT_KEY =~ ^[A-Z0-9]{8}$ ]] || fail ValueError "attach mode requires --parent-key KEY."
+    else
+        [[ -z $PUSH_PARENT_KEY ]] || fail ValueError "--parent-key is only valid with --mode attach."
+    fi
+    [[ -z $COLLECTION || $PUSH_MODE == new ]] || fail ValueError "--collection is only valid with --mode new."
+    if [[ -n $PUSH_TAGS_RAW ]]; then
+        [[ $PUSH_TAGS_RAW != ,* && $PUSH_TAGS_RAW != *, && $PUSH_TAGS_RAW != *,,* ]] ||
+            fail ValueError "tags must be a comma-separated list of nonempty tags without control characters."
+        IFS=',' read -r -a PUSH_TAGS <<<"$PUSH_TAGS_RAW"
+        "$JQ" -ne --args '$ARGS.positional | length>0 and all(.[];
+          length>0 and (contains(",")|not) and (test("[\u0000-\u001f\u007f]")|not))' \
+          -- "${PUSH_TAGS[@]}" >/dev/null ||
+            fail ValueError "tags must be a comma-separated list of nonempty tags without control characters."
+    fi
+    for dependency in flock find md5sum sha256sum cut tr cp grep mv; do
+        command -v "$dependency" >/dev/null || fail missing_dependency "Sending a document to Zotero requires utility: $dependency."
+    done
 fi
 if [[ $COMMAND == import || $COMMAND == sync-* || ($COMMAND == check-connection && -n $ITEM_KEY) ]]; then
     for dependency in unzip dd mv; do
@@ -217,6 +271,7 @@ done
     fail configuration_error "Invalid configuration. Shell backend supports flat keys with JSON-compatible quoted strings, numbers and booleans; no tables, literal/multiline strings or duplicate keys. Check required values and limits."
 get_config() { "$JQ" -r ".$1" "$WORK/config.json"; }
 [[ $TARGET_GIVEN == true ]] || TARGET="$(get_config default_target_folder)"
+[[ $LIMIT_GIVEN == true ]] || LIMIT="$(get_config list_page_limit)"
 [[ $QUEUE_TAG_SET == true ]] || QUEUE_TAG="$(get_config sync_queue_tag)"
 [[ $SYNCED_TAG_SET == true ]] || SYNCED_TAG="$(get_config sync_synced_tag)"
 absolute_path() {
@@ -281,13 +336,20 @@ load_state() {
                 type=="object"
                 and (.fetched_at | type=="number" and .>=0 and floor==.)
                 and (.tags | type=="array" and all(.[]; type=="string") and .==unique)));
+          def collection_cache_valid:
+            type=="object" and all(.[];
+              type=="object"
+              and (.fetched_at | type=="number" and .>=0 and floor==.)
+              and (.collections | type=="array" and all(.[];
+                type=="object" and (.key|type=="string") and (.name|type=="string"))));
           length==1 and (.[0] | type=="object" and .version==1
             and (.mappings|type=="object") and (.attempts|type=="object")
-            and (if has("tag_cache") then (.tag_cache|cache_valid) else true end))' "$STATE" >/dev/null ||
+            and (if has("tag_cache") then (.tag_cache|cache_valid) else true end)
+            and (if has("collection_cache") then (.collection_cache|collection_cache_valid) else true end))' "$STATE" >/dev/null ||
             fail state_error "Invalid JSON state. Existing SQLite state is separate and is not automatically migrated."
-        "$JQ" '.tag_cache //= {}' "$STATE" >"$WORK/state.json"
+        "$JQ" '.tag_cache //= {} | .collection_cache //= {}' "$STATE" >"$WORK/state.json"
     else
-        printf '%s\n' '{"version":1,"mappings":{},"attempts":{},"tag_cache":{}}' >"$WORK/state.json"
+        printf '%s\n' '{"version":1,"mappings":{},"attempts":{},"tag_cache":{},"collection_cache":{}}' >"$WORK/state.json"
     fi
 }
 save_state() {
@@ -524,6 +586,31 @@ find_attachment() {
     done
 }
 
+list_pdf_attachments() {
+    local start=0 count
+    : >"$WORK/child-pdfs.jsonl"
+    while :; do
+        metadata "items/$ITEM_KEY/children?limit=100&start=$start" "$WORK/children.json"
+        "$JQ" -e 'type=="array"' "$WORK/children.json" >/dev/null || fail zotero_error "Invalid attachment metadata."
+        "$JQ" -c '.[]|select(.data.contentType=="application/pdf" and
+          (.data.linkMode=="imported_file" or .data.linkMode=="imported_url"))
+          |{attachment_key:.data.key,title:((.data.title // .data.filename // "")|tostring)}' \
+          "$WORK/children.json" >>"$WORK/child-pdfs.jsonl"
+        count="$("$JQ" 'length' "$WORK/children.json")"
+        ((count == 100)) || break
+        start=$((start + count))
+        ((start < 10000)) || fail zotero_error "Attachment pagination exceeded the safety limit."
+    done
+    "$JQ" -se --arg key "$ITEM_KEY" '
+      if map(.attachment_key) | all(test("^[A-Z0-9]{8}$")) then
+        {ok:true,item_key:$key,attachments:.}
+      else error("invalid attachment key") end' \
+      "$WORK/child-pdfs.jsonl" >"$WORK/children-result.json" ||
+      fail zotero_error "Zotero returned an invalid attachment key."
+    if [[ $AS_JSON == true ]]; then "$JQ" '.' "$WORK/children-result.json"
+    else "$JQ" -r '.attachments[]|[.attachment_key,.title]|@tsv' "$WORK/children-result.json"; fi
+}
+
 total_results() {
     TOTAL_RESULTS="$("$JQ" -Rse '[split("\n")[] | select(ascii_downcase | startswith("total-results:"))
       | capture("^Total-Results:[ \t]*(?<value>[0-9]+)[ \t\r]*$";"i")
@@ -532,7 +619,7 @@ total_results() {
 }
 
 list_zotero_library() {
-    local encoded_query paper key has_pdf tag_parameter= encoded_tags total count next_skip
+    local encoded_query paper key has_pdf tag_parameter= encoded_tags total count next_skip base_path
     load_state
     encoded_query="$(printf '%s' "$QUERY" | "$JQ" -Rrs '@uri')"
     if ((${#TAGS[@]})); then
@@ -545,8 +632,10 @@ list_zotero_library() {
           fail ValueError "Tags must be nonempty literal names without controls, '||', or a leading backslash-hyphen."
         tag_parameter="&tag=$encoded_tags"
     fi
+    base_path="items/top"
+    [[ -z $COLLECTION ]] || base_path="collections/$COLLECTION/items/top"
     # Zotero permits one itemType parameter; leading '-' negates the OR group.
-    metadata "items/top?limit=$LIMIT&start=$SKIP&q=$encoded_query&itemType=-attachment%20%7C%7C%20note%20%7C%7C%20annotation&sort=dateModified&direction=desc$tag_parameter" "$WORK/items.json"
+    metadata "$base_path?limit=$LIMIT&start=$SKIP&q=$encoded_query&itemType=-attachment%20%7C%7C%20note%20%7C%7C%20annotation&sort=dateModified&direction=desc$tag_parameter" "$WORK/items.json"
     "$JQ" -e 'type=="array"' "$WORK/items.json" >/dev/null || fail zotero_error "Invalid item list."
     total_results
     total=$TOTAL_RESULTS
@@ -557,7 +646,8 @@ list_zotero_library() {
         ((count > 0)) || fail zotero_error "Zotero returned an empty page before the end; refresh the listing."
         next_skip=$((SKIP + count))
     fi
-    "$JQ" -c '.[]|.data|select(.itemType!="attachment" and .itemType!="note" and .itemType!="annotation")' \
+    "$JQ" -c '.[]|select(.data.itemType!="attachment" and .data.itemType!="note" and .data.itemType!="annotation")
+      |{key:.data.key,title:.data.title,date:.data.date,numChildren:(.meta.numChildren // 0)}' \
       "$WORK/items.json" >"$WORK/items.jsonl"
     : >"$WORK/papers.jsonl"
     while IFS= read -r paper; do
@@ -565,12 +655,12 @@ list_zotero_library() {
         key="$("$JQ" -r '.key' "$WORK/paper.json")"
         [[ $key =~ ^[A-Z0-9]{8}$ ]] || fail zotero_error "Zotero returned an invalid item key."
         find_mapping "$key"
-        find_attachment "$key"
-        has_pdf=false; [[ -z $ATTACHMENT ]] || has_pdf=true
-        "$JQ" -c --argjson pdf "$has_pdf" --arg scope "$LIBRARY_SCOPE" --arg key "$key" \
+        num_children="$("$JQ" '.numChildren' "$WORK/paper.json")"
+        has_pdf="$("$JQ" '.numChildren > 0' "$WORK/paper.json")"
+        "$JQ" -c --argjson pdf "$has_pdf" --argjson children "$num_children" --arg scope "$LIBRARY_SCOPE" --arg key "$key" \
           --slurpfile mapping "$WORK/mapping.json" --slurpfile state "$WORK/state.json" '
           {item_key:.key,title:((.title // "")|gsub("^\\s+|\\s+$";"")),
-           year:((.date // "")|tostring|gsub("^\\s+|\\s+$";"")),has_pdf:$pdf,
+           year:((.date // "")|tostring|gsub("^\\s+|\\s+$";"")),has_pdf:$pdf,num_children:$children,
            mapping:$mapping[0],attempt:($state[0].attempts[$scope][$key] // null)}' "$WORK/paper.json" >>"$WORK/papers.jsonl"
     done <"$WORK/items.jsonl"
     if [[ $PAGE_INFO == true ]]; then
@@ -578,7 +668,7 @@ list_zotero_library() {
           --argjson next "$next_skip" '{ok:true,items:.,pagination:{
             skip:$skip,limit:$limit,total:$total,has_more:($next!=null),next_skip:$next}}' "$WORK/papers.jsonl"
     elif [[ $AS_JSON == true ]]; then "$JQ" -s '.' "$WORK/papers.jsonl"
-    else "$JQ" -r '[.item_key,(if .has_pdf then "PDF" else "NO_PDF" end),.year,.title]|@tsv' "$WORK/papers.jsonl"; fi
+    else "$JQ" -r '[.item_key,("files~" + (.num_children|tostring)),.year,.title]|@tsv' "$WORK/papers.jsonl"; fi
 }
 
 list_zotero_tags() {
@@ -620,6 +710,46 @@ list_zotero_tags() {
 print_zotero_tags() {
     if [[ $AS_JSON == true ]]; then "$JQ" '.' "$WORK/tag-names.json"
     else "$JQ" -r '.[]' "$WORK/tag-names.json"; fi
+}
+list_zotero_collections() {
+    local start=0 count total
+    lock_state
+    load_state
+    if [[ $REFRESH == false ]] && "$JQ" -e --arg scope "$LIBRARY_SCOPE" \
+      '.collection_cache | has($scope)' "$WORK/state.json" >/dev/null; then
+        "$JQ" --arg scope "$LIBRARY_SCOPE" \
+          '.collection_cache[$scope].collections' "$WORK/state.json" >"$WORK/collection-names.json"
+        exec {json_lock}>&-
+        print_zotero_collections
+        return
+    fi
+    : >"$WORK/collections.jsonl"
+    while :; do
+        metadata "collections/top?limit=100&start=$start" "$WORK/collections.json"
+        "$JQ" -e 'type=="array" and all(.[]; .data.key|type=="string")' "$WORK/collections.json" >/dev/null ||
+            fail zotero_error "Zotero returned invalid collection data."
+        total_results
+        total=$TOTAL_RESULTS
+        count="$("$JQ" 'length' "$WORK/collections.json")"
+        ((count <= 100)) || fail zotero_error "Zotero returned an oversized collection page."
+        "$JQ" -c '.[]|.data|select(.key|test("^[A-Z0-9]{8}$"))
+          |{key:.key,name:((.name // "")|tostring|gsub("^\\s+|\\s+$";""))}' \
+          "$WORK/collections.json" >>"$WORK/collections.jsonl"
+        start=$((start + count))
+        ((start < total)) || break
+        ((count > 0)) || fail zotero_error "Zotero returned an empty collection page before the end; retry."
+    done
+    "$JQ" -s 'sort_by(.name)' "$WORK/collections.jsonl" >"$WORK/collection-names.json"
+    "$JQ" --arg scope "$LIBRARY_SCOPE" --slurpfile collections "$WORK/collection-names.json" \
+      '.collection_cache[$scope]={fetched_at:(now|floor),collections:$collections[0]}' \
+      "$WORK/state.json" >"$WORK/state-next.json"
+    save_state
+    exec {json_lock}>&-
+    print_zotero_collections
+}
+print_zotero_collections() {
+    if [[ $AS_JSON == true ]]; then "$JQ" '.' "$WORK/collection-names.json"
+    else "$JQ" -r '.[]|[.key,.name]|@tsv' "$WORK/collection-names.json"; fi
 }
 pdf_valid() {
     [[ -f $1 ]] || return 1
@@ -783,6 +913,41 @@ broker() {
     BROKER_REPLY=$reply
 }
 
+doc_status() {
+    local uuid=$1 title= item_key attachment_key updated_at
+    load_state
+    "$JQ" -c --arg uuid "$uuid" '.mappings[$uuid] // null' "$WORK/state.json" >"$WORK/doc-status-mapping.json"
+    if "$JQ" -e '.==null' "$WORK/doc-status-mapping.json" >/dev/null; then
+        "$JQ" -cn --arg uuid "$uuid" '{ok:true,rm_uuid:$uuid,mapped:false}'
+        return
+    fi
+    item_key="$("$JQ" -r '.zotero_item_key' "$WORK/doc-status-mapping.json")"
+    attachment_key="$("$JQ" -r '.zotero_attachment_key' "$WORK/doc-status-mapping.json")"
+    updated_at="$("$JQ" -r '.updated_at' "$WORK/doc-status-mapping.json")"
+    if [[ $item_key =~ ^[A-Z0-9]{8}$ ]]; then
+        request zotero "$API/items/$item_key" "$WORK/doc-status-item.json" 8388608 "$ZOTERO_TIMEOUT"
+        if [[ $HTTP_CODE == 200 ]] && "$JQ" -e '.' "$WORK/doc-status-item.json" >/dev/null 2>&1; then
+            title="$("$JQ" -r '.data.title // ""' "$WORK/doc-status-item.json")"
+        fi
+    fi
+    "$JQ" -cn --arg uuid "$uuid" --arg item "$item_key" --arg attachment "$attachment_key" \
+      --arg title "$title" --arg updated "$updated_at" \
+      '{ok:true,rm_uuid:$uuid,mapped:true,zotero_item_key:$item,zotero_attachment_key:$attachment,
+        zotero_item_title:$title,updated_at:$updated}'
+}
+doc_tags() {
+    local uuid=$1
+    local metadata_path="$LIBRARY/$uuid.metadata"
+    [[ -f $metadata_path && ! -L $metadata_path ]] ||
+        fail FileNotFoundError "No reMarkable document found with that UUID."
+    "$JQ" -e 'type=="object" and .type=="DocumentType" and (.deleted // false)==false' \
+      "$metadata_path" >/dev/null ||
+        fail FileNotFoundError "That reMarkable UUID is not an active document."
+    "$JQ" -c --arg uuid "$uuid" '{ok:true,rm_uuid:$uuid,
+      tags:((.tags // [])|map(select(type=="string"))|unique)}' "$metadata_path" ||
+        fail state_error "reMarkable document metadata could not be read."
+}
+
 library_list() {
     [[ -d $LIBRARY ]] || fail FileNotFoundError "reMarkable library directory not found."
     : >"$WORK/library.jsonl"
@@ -826,6 +991,14 @@ case "$COMMAND" in
         ACTIVITY_LOGGED=true
         ;;
     sync-item) sync_item ;;
+    doc-status) ACTIVITY_LOGGED=true; doc_status "$UUID_OPT" ;;
+    doc-tags) ACTIVITY_LOGGED=true; doc_tags "$UUID_OPT" ;;
+    push-document)
+        push_document "$UUID_OPT" "$PUSH_MODE" "$PUSH_PARENT_KEY" >"$WORK/push-command-result.json" || :
+        "$JQ" '.' "$WORK/push-command-result.json"
+        "$JQ" -e '.ok' "$WORK/push-command-result.json" >/dev/null || { ACTIVITY_LOGGED=true; exit 1; }
+        ACTIVITY_LOGGED=true
+        ;;
     clear-mappings) clear_state_mappings ;;
     ensure-folder)
         validate_target_folder
@@ -834,7 +1007,9 @@ case "$COMMAND" in
           '{ok:true,folder_path:$path,folder_uuid:$uuid}'
         ;;
     tags) list_zotero_tags ;;
+    collections) list_zotero_collections ;;
     library) library_list ;;
+    children) list_pdf_attachments ;;
     status)
         load_state
         find_mapping
@@ -876,7 +1051,36 @@ case "$COMMAND" in
           '.attempts[$scope][$key]!=null' "$WORK/state.json" >/dev/null; then
             fail import_uncertain "A previous import was not confirmed. Check the tablet library before --retry-uncertain; retrying may create a duplicate."
         fi
-        resolve_attachment
+        if [[ -n $ATTACHMENT_KEY_OPT ]]; then
+            metadata "items/$ITEM_KEY" "$WORK/item.json"
+            "$JQ" -e --arg key "$ITEM_KEY" '.data.key==$key and (.data.itemType|type=="string")' \
+              "$WORK/item.json" >/dev/null || fail zotero_error "Invalid source item metadata."
+            metadata "items/$ATTACHMENT_KEY_OPT" "$WORK/attachment-check.json"
+            "$JQ" -e --arg key "$ATTACHMENT_KEY_OPT" --arg parent "$ITEM_KEY" '
+              .data.key==$key and .data.parentItem==$parent and .data.contentType=="application/pdf"
+              and (.data.linkMode=="imported_file" or .data.linkMode=="imported_url")' \
+              "$WORK/attachment-check.json" >/dev/null ||
+              fail unsupported_item "The requested attachment is not a stored PDF that belongs to this item."
+            ATTACHMENT=$ATTACHMENT_KEY_OPT
+        else
+            resolve_attachment
+        fi
         import_selected_pdf
+        REMARKABLE_TAGS_UPDATED=false
+        REMARKABLE_TAGS_ERROR=
+        if [[ ($INCLUDE_ZOTERO_TAGS == true || $ADD_UNREAD_TAG == true) ]] &&
+          "$JQ" -e '.already_imported==false' "$WORK/import-result.json" >/dev/null; then
+            DOCUMENT_UUID="$("$JQ" -r '.rm_uuid' "$WORK/import-result.json")"
+            if (apply_selected_tags) >"$WORK/tag-result.json"; then
+                REMARKABLE_TAGS_UPDATED=true
+            else
+                REMARKABLE_TAGS_ERROR="$("$JQ" -r '.error // "tag_update_error"' "$WORK/tag-result.json" 2>/dev/null ||
+                  printf '%s' tag_update_error)"
+            fi
+        fi
+        "$JQ" --argjson tags_updated "$REMARKABLE_TAGS_UPDATED" --arg tags_error "$REMARKABLE_TAGS_ERROR" \
+          '.+{remarkable_tags_updated:$tags_updated}
+          + (if $tags_error=="" then {} else {remarkable_tags_error:$tags_error} end)' \
+          "$WORK/import-result.json"
         ;;
 esac

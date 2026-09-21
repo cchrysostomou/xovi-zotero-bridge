@@ -87,11 +87,11 @@ snapshot_reverse_documents() {
     done
 }
 
-export_reverse_pdf() {
-    local uuid=$1 name=$2 source_path="$REVERSE_FOLDER/$name" exported
+export_pdf_from_path() {
+    local uuid=$1 name=$2 source_path=$3
     [[ -n $RMAPI ]] || return 1
     rmapi_paired || return 1
-    RMAPI_CONFIG="$RMAPI_CONFIG" "$RMAPI" -json ls "$REVERSE_FOLDER" >"$WORK/cloud-list.json" 2>/dev/null ||
+    RMAPI_CONFIG="$RMAPI_CONFIG" "$RMAPI" -json ls "$(dirname -- "$source_path")" >"$WORK/cloud-list.json" 2>/dev/null ||
       return 1
     "$JQ" -e --arg uuid "$uuid" --arg name "$name" '
       [.[]|select(.id==$uuid and .name==$name and .type=="DocumentType")]|length==1' \
@@ -106,6 +106,37 @@ export_reverse_pdf() {
     ((${#reverse_pdfs[@]} == 1)) || return 1
     REVERSE_PDF=${reverse_pdfs[0]}
     pdf_valid "$REVERSE_PDF" || return 1
+}
+
+export_reverse_pdf() {
+    local uuid=$1 name=$2
+    export_pdf_from_path "$uuid" "$name" "$REVERSE_FOLDER/$name"
+}
+
+# Reconstructs the current on-device cloud path of a single document from
+# local metadata, independent of which folder it happens to live in. Used by
+# push_document, which (unlike the reverse_sync folder scan) targets an
+# arbitrary document identified only by its UUID.
+resolve_document_path() {
+    local target_uuid=$1 metadata_path id
+    : >"$WORK/doc-library.jsonl"
+    shopt -s nullglob
+    for metadata_path in "$LIBRARY"/*.metadata; do
+        id="${metadata_path##*/}"; id="${id%.metadata}"
+        if uuid_valid "$id" && "$JQ" -e '
+          type=="object" and ([.visibleName,.parent,.type]|all(type=="string"))
+          and (.type=="DocumentType" or .type=="CollectionType")' "$metadata_path" >/dev/null; then
+            "$JQ" -c --arg id "${id,,}" '{entry:{rm_uuid:$id,title:.visibleName,
+              parent:.parent,type:.type,deleted:(.deleted // false)}}' "$metadata_path" >>"$WORK/doc-library.jsonl"
+        fi
+    done
+    "$JQ" -s -f "$ROOT_DIR/scripts/zotbridge-shell-library.jq" "$WORK/doc-library.jsonl" >"$WORK/doc-library.json"
+    "$JQ" -e '.ok' "$WORK/doc-library.json" >/dev/null || return 1
+    RESOLVED_PATH="$("$JQ" -r --arg uuid "$target_uuid" '
+      [.entries[]|select(.rm_uuid==$uuid and .type=="DocumentType")]
+      | if length==1 then .[0].path else "" end' "$WORK/doc-library.json")"
+    [[ -n $RESOLVED_PATH ]] || return 1
+    RESOLVED_NAME="${RESOLVED_PATH##*/}"
 }
 
 prepare_reverse_file() {
@@ -141,7 +172,7 @@ resolve_reverse_parent() {
 }
 
 create_reverse_metadata() {
-    local uuid=$1 name=$2
+    local uuid=$1 name=$2 collection=${3:-}
     reverse_http zotero GET "$API/items/$REVERSE_ATTACHMENT" "$WORK/existing-attachment.json" || return 1
     if [[ $REVERSE_HTTP_CODE == 200 ]]; then
         "$JQ" -e --arg parent "$REVERSE_PARENT" --arg filename "$REVERSE_FILENAME" --arg md5 "$REVERSE_MD5" '
@@ -169,11 +200,12 @@ create_reverse_metadata() {
     fi
     "$JQ" -cn --arg parent "$REVERSE_PARENT" --arg attachment "$REVERSE_ATTACHMENT" \
       --arg title "$name" --arg filename "$REVERSE_FILENAME" --arg md5 "$REVERSE_MD5" \
-      --arg mtime "$REVERSE_MTIME" --argjson new_parent "$REVERSE_NEW_PARENT" '
+      --arg mtime "$REVERSE_MTIME" --argjson new_parent "$REVERSE_NEW_PARENT" --arg collection "$collection" '
       (if $new_parent then [{key:$parent,version:0,itemType:"document",title:$title,
         creators:[],abstractNote:"",publisher:"",date:"",language:"",shortTitle:"",
         url:"",accessDate:"",archive:"",archiveLocation:"",libraryCatalog:"",
-        callNumber:"",rights:"",extra:"",tags:[{tag:"from-rmk"}],collections:[],relations:{}}]
+        callNumber:"",rights:"",extra:"",tags:[{tag:"from-rmk"}],
+        collections:(if $collection=="" then [] else [$collection] end),relations:{}}]
        else [] end)
       + [{key:$attachment,version:0,itemType:"attachment",parentItem:$parent,
           linkMode:"imported_file",title:$filename,accessDate:"",note:"",tags:[],
@@ -187,12 +219,12 @@ create_reverse_metadata() {
 }
 
 upload_reverse_webdav() {
-    local dav_url="$(get_config webdav_url)" archive="$WORK/$REVERSE_ATTACHMENT.zip"
+    local force=${1:-false} dav_url="$(get_config webdav_url)" archive="$WORK/$REVERSE_ATTACHMENT.zip"
     reverse_http webdav GET "$dav_url$REVERSE_ATTACHMENT.prop" "$WORK/existing.prop" || return 1
-    if [[ $REVERSE_HTTP_CODE == 200 ]]; then
+    if [[ $REVERSE_HTTP_CODE == 200 && $force == false ]]; then
         grep -F "<mtime>$REVERSE_MTIME</mtime>" "$WORK/existing.prop" >/dev/null &&
           grep -F "<hash>$REVERSE_MD5</hash>" "$WORK/existing.prop" >/dev/null || return 1
-    elif [[ $REVERSE_HTTP_CODE != 404 ]]; then
+    elif [[ $REVERSE_HTTP_CODE != 200 && $REVERSE_HTTP_CODE != 404 ]]; then
         return 1
     fi
     mkdir -p "$WORK/archive"
@@ -243,6 +275,175 @@ record_reverse_mapping() {
       "$WORK/state.json" >"$WORK/state-next.json" || return 1
     save_state || return 1
     exec {reverse_state_lock}>&-
+}
+
+record_push_mapping() {
+    local uuid=$1 path=$2
+    exec {push_state_lock}>>"$STATE.lock"
+    flock -n "$push_state_lock" || return 1
+    load_state
+    "$JQ" -L "$ROOT_DIR/scripts" --arg type "$LIBRARY_TYPE" --arg library "$LIBRARY_ID" \
+      --arg item "$REVERSE_PARENT" --arg attachment "$REVERSE_ATTACHMENT" \
+      --arg path "$path" --arg uuid "$uuid" '
+      include "zotbridge-shell-mapping";
+      del(.mappings[$uuid]) | record_mapping($type;$library;$item;$attachment;$path;$uuid)' \
+      "$WORK/state.json" >"$WORK/state-next.json" || return 1
+    save_state || return 1
+    exec {push_state_lock}>&-
+}
+
+push_verify_parent() {
+    reverse_http zotero GET "$API/items/$REVERSE_PARENT" "$WORK/push-parent-check.json" || return 1
+    [[ $REVERSE_HTTP_CODE == 200 ]] || return 1
+    "$JQ" -e '.data.itemType!="attachment" and .data.itemType!="note" and .data.itemType!="annotation"
+      and (.data.deleted // false)==false' "$WORK/push-parent-check.json" >/dev/null
+}
+
+# Creates or updates the Zotero attachment (and, for a brand-new item, its
+# parent) for push_document. Unlike create_reverse_metadata (used by the
+# folder-scan reverse_sync), this must also support in-place PDF replacement
+# (mode=overwrite) and attaching to a caller-chosen existing item (mode=attach).
+create_push_attachment() {
+    local mode=$1
+    reverse_http zotero GET "$API/items/$REVERSE_ATTACHMENT" "$WORK/push-existing-attachment.json" || return 1
+    local existing_code=$REVERSE_HTTP_CODE
+    case "$mode" in
+        overwrite)
+            [[ $existing_code == 200 ]] || return 1
+            "$JQ" -e --arg parent "$REVERSE_PARENT" '.data.parentItem==$parent and .data.itemType=="attachment"' \
+              "$WORK/push-existing-attachment.json" >/dev/null || return 1
+            "$JQ" -c --arg filename "$REVERSE_FILENAME" --arg md5 "$REVERSE_MD5" --arg mtime "$REVERSE_MTIME" \
+              '[.data | .filename=$filename | .md5=$md5 | .mtime=$mtime]' \
+              "$WORK/push-existing-attachment.json" >"$WORK/push-update.json"
+            reverse_http zotero POST "$API/items" "$WORK/push-update-response.json" \
+              "$WORK/push-update.json" application/json || return 1
+            [[ $REVERSE_HTTP_CODE == 200 ]] || return 1
+            "$JQ" -e '.failed=={} and .success["0"]!=null' "$WORK/push-update-response.json" >/dev/null
+            ;;
+        attach)
+            if [[ $existing_code == 200 ]]; then
+                "$JQ" -e --arg parent "$REVERSE_PARENT" --arg filename "$REVERSE_FILENAME" --arg md5 "$REVERSE_MD5" '
+                  .data.parentItem==$parent and .data.filename==$filename
+                  and ((.data.md5 // "")|ascii_downcase)==$md5' \
+                  "$WORK/push-existing-attachment.json" >/dev/null || return 1
+                REVERSE_MTIME="$("$JQ" -r '.data.mtime|tostring' "$WORK/push-existing-attachment.json")"
+                return 0
+            fi
+            [[ $existing_code == 404 ]] || return 1
+            push_verify_parent || return 1
+            "$JQ" -cn --arg attachment "$REVERSE_ATTACHMENT" --arg parent "$REVERSE_PARENT" \
+              --arg filename "$REVERSE_FILENAME" --arg md5 "$REVERSE_MD5" --arg mtime "$REVERSE_MTIME" '
+              [{key:$attachment,version:0,itemType:"attachment",parentItem:$parent,
+                linkMode:"imported_file",title:$filename,accessDate:"",note:"",tags:[],
+                collections:[],relations:{},contentType:"application/pdf",charset:"",
+                filename:$filename,md5:$md5,mtime:$mtime}]' >"$WORK/push-create.json"
+            reverse_http zotero POST "$API/items" "$WORK/push-create-response.json" \
+              "$WORK/push-create.json" application/json || return 1
+            [[ $REVERSE_HTTP_CODE == 200 ]] || return 1
+            "$JQ" -e '.failed=={} and .success["0"]!=null' "$WORK/push-create-response.json" >/dev/null
+            ;;
+        new)
+            [[ $existing_code == 404 ]] || return 1
+            "$JQ" -cn --arg parent "$REVERSE_PARENT" --arg attachment "$REVERSE_ATTACHMENT" \
+              --arg title "$RESOLVED_NAME" --arg filename "$REVERSE_FILENAME" --arg md5 "$REVERSE_MD5" \
+              --arg mtime "$REVERSE_MTIME" --arg collection "$COLLECTION" --args '
+              ($ARGS.positional | map({tag:.})) as $extra_tags
+              | [{key:$parent,version:0,itemType:"document",title:$title,
+                  creators:[],abstractNote:"",publisher:"",date:"",language:"",shortTitle:"",
+                  url:"",accessDate:"",archive:"",archiveLocation:"",libraryCatalog:"",
+                  callNumber:"",rights:"",extra:"",
+                  tags:(($extra_tags + [{tag:"from-rmk"}]) | unique),
+                  collections:(if $collection=="" then [] else [$collection] end),relations:{}},
+                 {key:$attachment,version:0,itemType:"attachment",parentItem:$parent,
+                  linkMode:"imported_file",title:$filename,accessDate:"",note:"",tags:[],
+                  collections:[],relations:{},contentType:"application/pdf",charset:"",
+                  filename:$filename,md5:$md5,mtime:$mtime}]' -- "${PUSH_TAGS[@]}" >"$WORK/push-create.json"
+            reverse_http zotero POST "$API/items" "$WORK/push-create-response.json" \
+              "$WORK/push-create.json" application/json || return 1
+            [[ $REVERSE_HTTP_CODE == 200 ]] || return 1
+            "$JQ" -e '.failed=={} and .success["0"]!=null and .success["1"]!=null' \
+              "$WORK/push-create-response.json" >/dev/null
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+# Merges the caller-selected reMarkable tags into the parent item's existing
+# Zotero tags (attach/overwrite modes only; mode=new embeds tags at creation).
+apply_push_tags_to_parent() {
+    ((${#PUSH_TAGS[@]})) || return 0
+    reverse_http zotero GET "$API/items/$REVERSE_PARENT" "$WORK/push-parent-tags.json" || return 1
+    [[ $REVERSE_HTTP_CODE == 200 ]] || return 1
+    "$JQ" -nc --slurpfile parent "$WORK/push-parent-tags.json" --args '
+      ($parent[0].data.tags // []) as $existing
+      | ($existing + ($ARGS.positional | map({tag:.}))) | unique' \
+      -- "${PUSH_TAGS[@]}" >"$WORK/push-merged-tags.json"
+    "$JQ" -ne --slurpfile parent "$WORK/push-parent-tags.json" --slurpfile merged "$WORK/push-merged-tags.json" \
+      '($parent[0].data.tags // []) == $merged[0]' >/dev/null && return 0
+    "$JQ" -nc --slurpfile parent "$WORK/push-parent-tags.json" --slurpfile merged "$WORK/push-merged-tags.json" \
+      '[$parent[0].data | .tags=$merged[0]]' >"$WORK/push-tags-update.json"
+    reverse_http zotero POST "$API/items" "$WORK/push-tags-update-response.json" \
+      "$WORK/push-tags-update.json" application/json || return 1
+    [[ $REVERSE_HTTP_CODE == 200 ]] || return 1
+    "$JQ" -e '.failed=={} and .success["0"]!=null' "$WORK/push-tags-update-response.json" >/dev/null
+}
+
+push_document() {
+    local uuid=$1 mode=$2 parent_key=${3:-}
+    [[ $USE_WEBDAV == true && $LIBRARY_TYPE == user ]] ||
+      { reverse_fail "$uuid" configuration webdav_required; return 1; }
+    [[ -n $RMAPI && -x ${SEVEN_ZIP:-} ]] ||
+      { reverse_fail "$uuid" configuration missing_dependency; return 1; }
+    for dependency in flock find md5sum sha256sum cut tr cp grep; do
+        command -v "$dependency" >/dev/null ||
+          { reverse_fail "$uuid" configuration missing_dependency; return 1; }
+    done
+    reverse_activity started "$uuid"
+    resolve_document_path "$uuid" ||
+      { reverse_fail "$uuid" locate document_not_found; return 1; }
+    export_pdf_from_path "$uuid" "$RESOLVED_NAME" "$RESOLVED_PATH" ||
+      { reverse_fail "$uuid" export unsupported_export; return 1; }
+    prepare_reverse_file "$RESOLVED_NAME" ||
+      { reverse_fail "$uuid" export invalid_filename; return 1; }
+    case "$mode" in
+        new)
+            REVERSE_PARENT="$(reverse_key parent "$uuid")"
+            REVERSE_ATTACHMENT="$(reverse_key attachment "$uuid")"
+            ;;
+        attach)
+            REVERSE_PARENT=$parent_key
+            REVERSE_ATTACHMENT="$(reverse_key attachment "$uuid:$parent_key")"
+            ;;
+        overwrite)
+            load_state
+            "$JQ" -c --arg uuid "$uuid" '.mappings[$uuid] // null' "$WORK/state.json" >"$WORK/push-mapping.json"
+            "$JQ" -e '.!=null' "$WORK/push-mapping.json" >/dev/null ||
+              { reverse_fail "$uuid" resolve not_mapped; return 1; }
+            REVERSE_PARENT="$("$JQ" -r '.zotero_item_key' "$WORK/push-mapping.json")"
+            REVERSE_ATTACHMENT="$("$JQ" -r '.zotero_attachment_key' "$WORK/push-mapping.json")"
+            [[ $REVERSE_PARENT =~ ^[A-Z0-9]{8}$ && $REVERSE_ATTACHMENT =~ ^[A-Z0-9]{8}$ ]] ||
+              { reverse_fail "$uuid" resolve invalid_mapping; return 1; }
+            ;;
+        *)
+            reverse_fail "$uuid" configuration invalid_mode
+            return 1
+            ;;
+    esac
+    create_push_attachment "$mode" ||
+      { reverse_fail "$uuid" create_attachment metadata_create_failed; return 1; }
+    if [[ $mode != new ]]; then
+        apply_push_tags_to_parent ||
+          { reverse_fail "$uuid" apply_tags tag_update_failed; return 1; }
+    fi
+    upload_reverse_webdav "$([[ $mode == overwrite ]] && printf true || printf false)" ||
+      { reverse_fail "$uuid" upload_zip webdav_upload_failed; return 1; }
+    verify_reverse_upload ||
+      { reverse_fail "$uuid" verify verification_failed; return 1; }
+    record_push_mapping "$uuid" "$RESOLVED_PATH" ||
+      { reverse_fail "$uuid" verify mapping_save_failed; return 1; }
+    reverse_activity completed "$uuid"
+    "$JQ" -cn --arg uuid "$uuid" --arg mode "$mode" --arg parent "$REVERSE_PARENT" --arg attachment "$REVERSE_ATTACHMENT" \
+      '{ok:true,rm_uuid:$uuid,mode:$mode,zotero_item_key:$parent,zotero_attachment_key:$attachment}'
 }
 
 move_reverse_document() {
