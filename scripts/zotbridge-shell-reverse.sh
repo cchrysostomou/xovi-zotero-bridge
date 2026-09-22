@@ -128,8 +128,8 @@ export_reverse_pdf() {
 trim_annotated_pdf() {
     local uuid=$1 dst="$WORK/export/annotated.pdf" rc
     rm -f -- "$dst"
-    "$LOCALGETA" -library "$LIBRARY" -uuid "$uuid" -output "$dst" -k >/dev/null 2>&1
-    rc=$?
+    rc=0
+    "$LOCALGETA" -library "$LIBRARY" -uuid "$uuid" -output "$dst" -k >/dev/null 2>&1 || rc=$?
     ((rc == 0)) || return 1
     pdf_valid "$dst" || return 1
     REVERSE_PDF=$dst
@@ -449,8 +449,8 @@ compute_send_markup() {
     export_pdf_from_path "$uuid" || return 1
     SEND_MERGED_PDF=$REVERSE_PDF
     rm -f -- "$annotated_output"
-    "$LOCALGETA" -library "$LIBRARY" -uuid "$uuid" -output "$annotated_output" -k >/dev/null 2>"$WORK/localgeta-annotated.err"
-    rc=$?
+    rc=0
+    "$LOCALGETA" -library "$LIBRARY" -uuid "$uuid" -output "$annotated_output" -k >/dev/null 2>"$WORK/localgeta-annotated.err" || rc=$?
     if ((rc == 0)) && pdf_valid "$annotated_output"; then
         SEND_HAS_MARKUP=true
         SEND_ANNOTATED_PDF=$annotated_output
@@ -521,6 +521,14 @@ send_to_zotero() {
     [[ "$("$JQ" -r '.fileType // ""' "$content")" == pdf ]] ||
         fail unsupported_export "Only PDF-backed documents can be sent to Zotero."
     local name; name="$("$JQ" -r '.visibleName' "$meta")"
+    # Unlike reverse_item (which always calls resolve_reverse_folder first),
+    # send_to_zotero never moves or copies the document into the reverse-sync
+    # folder, so REVERSE_FOLDER is otherwise left unset here. record_reverse_mapping
+    # dereferences it for the recorded rm_path; under `set -eu` an unset reference
+    # is a fatal "unbound variable" error (silently swallowed by the stderr
+    # redirect above), which aborted the whole command with no JSON output at all.
+    # The document isn't relocated by this flow, so record an empty rm_path.
+    REVERSE_FOLDER=""
 
     local send_parent send_new_parent=false
     if [[ $mode == attach ]]; then
