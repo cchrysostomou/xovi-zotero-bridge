@@ -34,13 +34,13 @@ reverse_fail() {
 }
 
 reverse_http() {
-    local auth=$1 method=$2 url=$3 output=$4 body=${5:-} content_type=${6:-} write_token=
+    local auth=$1 method=$2 url=$3 output=$4 body=${5:-} content_type=${6:-} version=${7:-} write_token=
     if [[ $auth == zotero && $method == POST && -n $body ]]; then
         write_token="$(sha256sum "$body" | cut -c1-32)"
     fi
     printf '%s' "$url" >"$WORK/reverse-url"
     "$JQ" -nr --rawfile url "$WORK/reverse-url" --arg auth "$auth" --arg method "$method" \
-      --arg body "$body" --arg content "$content_type" --arg token "$write_token" \
+      --arg body "$body" --arg content "$content_type" --arg token "$write_token" --arg version "$version" \
       --slurpfile cfg "$WORK/config.json" '
       "url = \($url|@json)", "silent", "request = \($method|@json)",
       "proto = \"=http,https\"", "max-redirs = 0", "connect-timeout = 60", "max-time = 300",
@@ -51,6 +51,7 @@ reverse_http() {
          "user = \(($cfg[0].webdav_username+":"+$cfg[0].webdav_password)|@json)", "basic"
        end),
       (if $token!="" then "header = \(("Zotero-Write-Token: "+$token)|@json)" else empty end),
+      (if $version!="" then "header = \(("If-Unmodified-Since-Version: "+$version)|@json)" else empty end),
       (if $content!="" then "header = \(("Content-Type: "+$content)|@json)" else empty end),
       (if $body!="" then "data-binary = \(("@"+$body)|@json)" else empty end)' >"$WORK/reverse-curl.conf"
     chmod 600 "$WORK/reverse-curl.conf"
@@ -418,6 +419,234 @@ reverse_item() {
     reverse_activity completed "$source_uuid"
     "$JQ" -cn --arg uuid "$source_uuid" --arg parent "$REVERSE_PARENT" --arg attachment "$REVERSE_ATTACHMENT" \
       '{ok:true,rm_uuid:$uuid,zotero_parent_key:$parent,zotero_attachment_key:$attachment}'
+}
+
+# Variant-aware counterpart to prepare_reverse_file for send_to_zotero:
+# builds the attachment filename with the variant-specific suffix
+# (plain/.pdf, merged/.rm.pdf, annotated-only/.rm.annot.pdf) instead of the
+# fixed ".annot.pdf" reverse-sync uses, and points REVERSE_PDF at the
+# already-produced file for this variant rather than mutating a shared one.
+prepare_send_file() {
+    local name=$1 suffix=$2 pdf_path=$3 base
+    base="${name%.pdf}"; base="${base%.PDF}"
+    REVERSE_FILENAME="$base$suffix"
+    [[ $REVERSE_FILENAME != */* && $REVERSE_FILENAME != *\\* &&
+       $REVERSE_FILENAME != *$'\n'* && $REVERSE_FILENAME != *$'\r'* &&
+       ${#REVERSE_FILENAME} -le 240 ]] || return 1
+    REVERSE_MD5="$(md5sum "$pdf_path" | cut -d ' ' -f1)"
+    REVERSE_MTIME="$(date +%s)000"
+    REVERSE_SIZE="$(wc -c <"$pdf_path")"
+    REVERSE_PDF=$pdf_path
+}
+
+# Exports the full merged (all pages, annotations baked in) PDF for $uuid and
+# determines whether it actually has any annotated pages, using the same
+# rm-pdfium/broker signals as trim_annotated_pdf. Unlike trim_annotated_pdf,
+# this keeps the untrimmed export available (SEND_MERGED_PDF) instead of
+# replacing it, since send_to_zotero may need to upload the untrimmed export,
+# a trimmed-to-annotated-pages copy (built separately by
+# build_send_annotated_pdf), or both from the same underlying export.
+# Returns 1 only when the export itself fails; a document with zero
+# annotated pages is not an error (SEND_HAS_MARKUP is simply left false).
+compute_send_markup() {
+    local uuid=$1 content_path="$LIBRARY/$uuid.content" page_range
+    SEND_HAS_MARKUP=false
+    SEND_MERGED_PDF=
+    SEND_ANNOT_PAGE_RANGE=
+    export_pdf_from_path "$uuid" || return 1
+    SEND_MERGED_PDF=$REVERSE_PDF
+    [[ -f $content_path ]] || return 0
+    broker getContentPages "$uuid" text || return 0
+    printf '%s' "$BROKER_REPLY" >"$WORK/send-annot-ids.txt"
+    "$JQ" -R -s '[splits("\n")] | map(select(length > 0))' "$WORK/send-annot-ids.txt" >"$WORK/send-annot-ids.json"
+    "$JQ" -e -r --slurpfile content "$content_path" -f "$ROOT_DIR/scripts/zotbridge-shell-trim-pages.jq" \
+      "$WORK/send-annot-ids.json" >"$WORK/send-annot-range.txt" 2>/dev/null || return 0
+    page_range="$(<"$WORK/send-annot-range.txt")"
+    [[ -n $page_range ]] || return 0
+    SEND_HAS_MARKUP=true
+    SEND_ANNOT_PAGE_RANGE=$page_range
+}
+
+# Trims compute_send_markup's SEND_MERGED_PDF down to only the annotated
+# pages, using the page range it already computed. Sets SEND_ANNOTATED_PDF
+# on success. Must only be called after compute_send_markup reports
+# SEND_HAS_MARKUP=true.
+build_send_annotated_pdf() {
+    local dst="$WORK/export/annotated-only.pdf"
+    rm -f -- "$dst"
+    broker trimPdf "$SEND_MERGED_PDF,$dst,$SEND_ANNOT_PAGE_RANGE" text || return 1
+    [[ $BROKER_REPLY == ok ]] || return 1
+    pdf_valid "$dst" || return 1
+    SEND_ANNOTATED_PDF=$dst
+}
+
+# Updates an already-mapped Zotero item's tags to include any newly selected
+# reMarkable tags (union, not replace), using a version-conditional PATCH so
+# a concurrent edit is rejected rather than silently overwritten. A no-op
+# (SEND_TAGS_UPDATED=false) when tags_csv is empty or every requested tag is
+# already present.
+update_send_item_tags() {
+    local item_key=$1 tags_csv=$2 version
+    SEND_TAGS_UPDATED=false
+    [[ -n $tags_csv ]] || return 0
+    request zotero "$API/items/$item_key" "$WORK/send-tags-item.json" 8388608 "$ZOTERO_TIMEOUT"
+    [[ $HTTP_CODE == 200 ]] || return 1
+    "$JQ" -e '.' "$WORK/send-tags-item.json" >/dev/null || return 1
+    "$JQ" -c --arg tags "$tags_csv" '
+      ($tags | split(",") | map({tag:.})) as $new
+      | ((.data.tags // []) + $new) | unique_by(.tag) | sort_by(.tag)' \
+      "$WORK/send-tags-item.json" >"$WORK/send-tags-merged.json" || return 1
+    "$JQ" -e --slurpfile merged "$WORK/send-tags-merged.json" \
+      '((.data.tags // []) | sort_by(.tag)) == $merged[0]' "$WORK/send-tags-item.json" >/dev/null &&
+      return 0
+    version="$("$JQ" -r '.version' "$WORK/send-tags-item.json")"
+    "$JQ" -cn --slurpfile tags "$WORK/send-tags-merged.json" '{tags:$tags[0]}' >"$WORK/send-tags-patch.json"
+    request zotero "$API/items/$item_key" "$WORK/send-tags-response.json" 8388608 "$ZOTERO_TIMEOUT" \
+      PATCH "$WORK/send-tags-patch.json" "$version"
+    [[ $HTTP_CODE == 204 ]] || return 1
+    SEND_TAGS_UPDATED=true
+}
+
+# Direct "Send to Zotero" entry point for the reader's dialog: unlike
+# queue_for_zotero/reverse_sync, this uploads straight from the currently
+# open document with no folder duplication or later reverse-sync pass, and
+# supports sending any combination of the plain PDF, the fully merged
+# (all pages, annotations baked in) PDF and the annotated-pages-only PDF as
+# independent attachments on the same Zotero parent item, plus updating an
+# already-mapped item's tags even when no new attachment content is sent
+# (e.g. the document has no markup yet).
+send_to_zotero() {
+    local uuid=$1 mode=$2 parent_key=${3:-} collection=${4:-} tags_csv=${5:-} \
+          send_plain=$6 send_merged=$7 send_annotated_only=$8
+    [[ $USE_WEBDAV == true && $LIBRARY_TYPE == user ]] ||
+        fail configuration_error "Sending to Zotero requires WebDAV storage for a personal Zotero library."
+    [[ -x ${SEVEN_ZIP:-} ]] ||
+        fail missing_dependency "Sending to Zotero requires the bundled 7zz binary."
+    local meta="$LIBRARY/$uuid.metadata" content="$LIBRARY/$uuid.content" pdf="$LIBRARY/$uuid.pdf"
+    [[ -f $meta && -f $content && -f $pdf ]] ||
+        fail FileNotFoundError "No reMarkable document found with that UUID."
+    "$JQ" -e '.type=="DocumentType" and (.deleted // false)==false
+      and (.visibleName|type=="string" and length>0)' "$meta" >/dev/null ||
+        fail FileNotFoundError "That reMarkable UUID is not an active document."
+    [[ "$("$JQ" -r '.fileType // ""' "$content")" == pdf ]] ||
+        fail unsupported_export "Only PDF-backed documents can be sent to Zotero."
+    local name; name="$("$JQ" -r '.visibleName' "$meta")"
+
+    local send_parent send_new_parent=false
+    if [[ $mode == attach ]]; then
+        reverse_http zotero GET "$API/items/$parent_key" "$WORK/send-parent-check.json" ||
+            fail state_error "Could not verify the selected Zotero item."
+        [[ $REVERSE_HTTP_CODE == 200 ]] ||
+            fail ValueError "The selected Zotero item could not be found."
+        "$JQ" -e '.data.itemType!="attachment" and .data.itemType!="note" and .data.itemType!="annotation"
+          and (.data.deleted // false)==false' "$WORK/send-parent-check.json" >/dev/null ||
+            fail ValueError "The selected Zotero item is not a valid attachment parent."
+        send_parent=$parent_key
+    else
+        send_parent="$(reverse_key parent "$uuid")"
+        send_new_parent=true
+    fi
+
+    local has_markup=false markup_failed=false
+    if [[ $send_merged == true || $send_annotated_only == true ]]; then
+        [[ -n $LOCALGETA ]] ||
+            fail missing_dependency "Sending markup requires the bundled zotbridge-localgeta binary."
+        compute_send_markup "$uuid" || markup_failed=true
+        [[ $markup_failed == true ]] || has_markup=$SEND_HAS_MARKUP
+    fi
+
+    # Each entry below is one requested-and-relevant attachment variant to
+    # attempt, or a placeholder marking a variant as skipped (checkbox on,
+    # but the document has no markup: nothing new to send for it) or failed
+    # (checkbox on, but the merged/annotated export itself could not be
+    # produced) before any upload is attempted.
+    local variants=() suffixes=() files=()
+    if [[ $send_plain == true ]]; then
+        variants+=(plain); suffixes+=(".pdf"); files+=("$pdf")
+    fi
+    if [[ $send_merged == true ]]; then
+        variants+=(merged); suffixes+=(".rm.pdf")
+        if [[ $markup_failed == true ]]; then files+=("__FAILED__")
+        elif [[ $has_markup == true ]]; then files+=("$SEND_MERGED_PDF")
+        else files+=("__SKIPPED__")
+        fi
+    fi
+    if [[ $send_annotated_only == true ]]; then
+        variants+=(annotated_only); suffixes+=(".rm.annot.pdf")
+        if [[ $markup_failed == true ]]; then files+=("__FAILED__")
+        elif [[ $has_markup == true ]] && build_send_annotated_pdf; then files+=("$SEND_ANNOTATED_PDF")
+        elif [[ $has_markup == true ]]; then files+=("__FAILED__")
+        else files+=("__SKIPPED__")
+        fi
+    fi
+
+    : >"$WORK/send-results.jsonl"
+    local i variant suffix file any_failed=false uploaded=false
+    declare -A variant_attachment=()
+    for ((i = 0; i < ${#variants[@]}; i++)); do
+        variant=${variants[i]}; suffix=${suffixes[i]}; file=${files[i]}
+        if [[ $file == __SKIPPED__ ]]; then
+            "$JQ" -cn --arg variant "$variant" '{variant:$variant,status:"skipped_no_markup"}' \
+              >>"$WORK/send-results.jsonl"
+            continue
+        fi
+        if [[ $file == __FAILED__ ]]; then
+            "$JQ" -cn --arg variant "$variant" '{variant:$variant,status:"failed"}' >>"$WORK/send-results.jsonl"
+            any_failed=true
+            continue
+        fi
+        REVERSE_PARENT=$send_parent
+        REVERSE_NEW_PARENT=$send_new_parent
+        REVERSE_ATTACHMENT="$(reverse_key "attachment-$variant" "$uuid")"
+        if prepare_send_file "$name" "$suffix" "$file" &&
+           create_reverse_metadata "$uuid" "$name" "$collection" "$tags_csv" &&
+           upload_reverse_webdav &&
+           verify_reverse_upload; then
+            "$JQ" -cn --arg variant "$variant" --arg attachment "$REVERSE_ATTACHMENT" \
+              '{variant:$variant,status:"uploaded",zotero_attachment_key:$attachment}' \
+              >>"$WORK/send-results.jsonl"
+            variant_attachment[$variant]=$REVERSE_ATTACHMENT
+            uploaded=true
+            send_new_parent=false
+        else
+            "$JQ" -cn --arg variant "$variant" '{variant:$variant,status:"failed"}' >>"$WORK/send-results.jsonl"
+            any_failed=true
+        fi
+    done
+
+    # Prefer recording the richest variant as the "primary" attachment for
+    # future doc-status lookups: merged (all pages, markup included) over
+    # annotated-pages-only over plain.
+    local primary priority=
+    for priority in merged annotated_only plain; do
+        if [[ -n ${variant_attachment[$priority]:-} ]]; then
+            primary=${variant_attachment[$priority]}
+            break
+        fi
+    done
+
+    local tags_ok=true
+    SEND_TAGS_UPDATED=false
+    if [[ $mode == attach && -n $tags_csv ]]; then
+        update_send_item_tags "$send_parent" "$tags_csv" || tags_ok=false
+    fi
+
+    if [[ $uploaded == true ]]; then
+        REVERSE_PARENT=$send_parent
+        REVERSE_ATTACHMENT=$primary
+        record_reverse_mapping "$uuid" || any_failed=true
+    fi
+
+    local overall_ok=true
+    [[ $any_failed == false && $tags_ok == true ]] || overall_ok=false
+    "$JQ" -cn --arg uuid "$uuid" --argjson ok "$overall_ok" \
+      --arg parent "$([[ $uploaded == true ]] && printf '%s' "$send_parent")" \
+      --slurpfile variant_results "$WORK/send-results.jsonl" \
+      --argjson tags_updated "$SEND_TAGS_UPDATED" --argjson tags_ok "$tags_ok" \
+      '{ok:$ok, rm_uuid:$uuid,
+        zotero_item_key:(if $parent=="" then null else $parent end),
+        variants:$variant_results, tags_updated:$tags_updated, tags_ok:$tags_ok}'
+    [[ $overall_ok == true ]]
 }
 
 reverse_sync() {

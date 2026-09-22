@@ -124,8 +124,9 @@ AFFECT [[1224665461898798997]]
                 property var tagsList: []
                 property var tagSelection: ({})
                 property string mode: "new"
-                property bool annotatedOnly: false
-                property bool runReverseSyncNow: false
+                property bool sendPlain: true
+                property bool sendMerged: false
+                property bool sendAnnotatedOnly: false
                 property bool mapped: false
                 property string mappedTitle: ""
                 property string mappedItemKey: ""
@@ -160,7 +161,7 @@ AFFECT [[1224665461898798997]]
                 onVisibleChanged: {
                     if (visible) {
                         docUuid = !!~&7712934851008712&~ ? ~&7712934851008712&~.~&5972374&~ : "";
-                        mode = "new"; annotatedOnly = false; runReverseSyncNow = false;
+                        mode = "new"; sendPlain = true; sendMerged = false; sendAnnotatedOnly = false;
                         parentKey = ""; searchResults = []; tagSelection = ({});
                         tagsList = []; mapped = false; mappedTitle = ""; mappedItemKey = ""; newTagText = "";
                         docTitle = ""; zoteroParentSearch.text = "";
@@ -184,7 +185,7 @@ AFFECT [[1224665461898798997]]
                     }
                 }
 
-                function run(kind, arguments) {
+                function run(kind, arguments, timeoutMs) {
                     if (busy) return;
                     busy = true;
                     zoteroDialogCommand.pending = kind;
@@ -193,7 +194,7 @@ AFFECT [[1224665461898798997]]
                     zoteroDialogCommand.arguments = [
                         "/home/root/xovi-zotero-bridge/scripts/zotbridge-run.sh"
                     ].concat(arguments);
-                    if (!zoteroDialogCommand.startCommand(30000)) {
+                    if (!zoteroDialogCommand.startCommand(timeoutMs || 30000)) {
                         busy = false;
                         statusText = "Could not start bridge command.";
                     }
@@ -226,12 +227,16 @@ AFFECT [[1224665461898798997]]
                     }
                 }
 
-                function toggleAnnotatedOnly() {
-                    annotatedOnly = !annotatedOnly;
+                function toggleSendPlain() {
+                    sendPlain = !sendPlain;
                 }
 
-                function toggleRunReverseSyncNow() {
-                    runReverseSyncNow = !runReverseSyncNow;
+                function toggleSendMerged() {
+                    sendMerged = !sendMerged;
+                }
+
+                function toggleSendAnnotatedOnly() {
+                    sendAnnotatedOnly = !sendAnnotatedOnly;
                 }
 
                 function addTag() {
@@ -249,15 +254,44 @@ AFFECT [[1224665461898798997]]
                         statusText = "Choose a parent item to attach to.";
                         return;
                     }
+                    if (!sendPlain && !sendMerged && !sendAnnotatedOnly) {
+                        if (mapped) {
+                            // Mapped documents may have nothing new to send (no
+                            // markup checkboxes ticked); still update tags below.
+                            submitTagsOnly();
+                            return;
+                        }
+                        statusText = "Choose at least one PDF variant to send.";
+                        return;
+                    }
                     var chosenTags = [];
                     for (var key in tagSelection) if (tagSelection[key]) chosenTags.push(key);
-                    var arguments = ["queue-for-zotero", "--uuid", docUuid, "--mode", mode];
+                    var arguments = ["send-to-zotero", "--uuid", docUuid, "--mode", mode];
                     if (mode === "attach") arguments = arguments.concat(["--parent-key", parentKey]);
                     if (mode === "new" && collectionKey.length === 8) arguments = arguments.concat(["--collection", collectionKey]);
                     if (chosenTags.length > 0) arguments = arguments.concat(["--tags", chosenTags.join(",")]);
-                    if (annotatedOnly) arguments = arguments.concat(["--annotated-only"]);
-                    statusText = "Duplicating into the Zotero folder\u2026";
-                    run("queue", arguments);
+                    if (sendPlain) arguments = arguments.concat(["--send-plain"]);
+                    if (sendMerged) arguments = arguments.concat(["--send-merged"]);
+                    if (sendAnnotatedOnly) arguments = arguments.concat(["--send-annotated-only"]);
+                    statusText = "Sending to Zotero\u2026";
+                    run("send", arguments, 180000);
+                }
+
+                function submitTagsOnly() {
+                    // Nothing new to upload (mapped document, no markup checkboxes
+                    // selected), but the user may still have changed the tag
+                    // selection. send-to-zotero accepts a call with zero
+                    // --send-* flags as long as --tags is present: it just
+                    // updates the existing item's tags and uploads nothing.
+                    var chosenTags = [];
+                    for (var key in tagSelection) if (tagSelection[key]) chosenTags.push(key);
+                    if (chosenTags.length === 0) {
+                        statusText = "Nothing to send: no markup selected and no tags changed.";
+                        return;
+                    }
+                    statusText = "Updating tags in Zotero\u2026";
+                    run("send", ["send-to-zotero", "--uuid", docUuid, "--mode", "attach",
+                                 "--parent-key", parentKey, "--tags", chosenTags.join(",")], 60000);
                 }
 
                 function finishCommand() {
@@ -292,7 +326,12 @@ AFFECT [[1224665461898798997]]
                         mappedTitle = result.zotero_item_title || "";
                         mappedItemKey = result.zotero_item_key || "";
                         mode = mapped ? "attach" : "new";
-                        if (mapped) parentKey = mappedItemKey;
+                        if (mapped) {
+                            parentKey = mappedItemKey;
+                            // Mapped documents already have their unmarked PDF in
+                            // Zotero; only the markup checkboxes apply here.
+                            sendPlain = false;
+                        }
                         runTags();
                     } else if (kind === "tags") {
                         tagsList = result.tags || [];
@@ -304,21 +343,22 @@ AFFECT [[1224665461898798997]]
                             ("Already linked to \"" + mappedTitle + "\".") :
                             "Not yet linked to Zotero. Choose how to send it.";
                         if (!mapped) runCollections();
-                    } else if (kind === "queue") {
-                        statusText = "Duplicated into the Zotero folder.";
-                        if (runReverseSyncNow) {
-                            zoteroReverseSyncCommand.arguments = [
-                                "/home/root/xovi-zotero-bridge/scripts/zotbridge-run.sh", "reverse-sync"
-                            ];
-                            zoteroReverseSyncCommand.startCommand(180000);
+                    } else if (kind === "send") {
+                        var uploadedCount = 0, skippedCount = 0, failedCount = 0;
+                        var results = result.variants || [];
+                        for (var i = 0; i < results.length; i++) {
+                            if (results[i].status === "uploaded") uploadedCount++;
+                            else if (results[i].status === "skipped_no_markup") skippedCount++;
+                            else failedCount++;
                         }
+                        var parts = [];
+                        if (uploadedCount > 0) parts.push(uploadedCount + " sent");
+                        if (skippedCount > 0) parts.push(skippedCount + " skipped (no markup)");
+                        if (failedCount > 0) parts.push(failedCount + " failed");
+                        if (result.tags_updated) parts.push("tags updated");
+                        statusText = parts.length > 0 ? parts.join(", ") + "." : "Nothing to send.";
                         close();
                     }
-                }
-
-                AsyncCommandExecutor {
-                    id: zoteroReverseSyncCommand
-                    command: "sh"
                 }
 
                 Rectangle {
@@ -386,7 +426,7 @@ AFFECT [[1224665461898798997]]
                             Rectangle {
                                 width: 160; height: 48
                                 color: zoteroSendDialog.busy ? "#aaaaaa" : "black"
-                                Text { anchors.centerIn: parent; text: "Duplicate"; color: "white"; font.pixelSize: 18 }
+                                Text { anchors.centerIn: parent; text: "Send"; color: "white"; font.pixelSize: 18 }
                                 MouseArea {
                                     anchors.fill: parent
                                     enabled: !zoteroSendDialog.busy
@@ -420,6 +460,7 @@ AFFECT [[1224665461898798997]]
 
                                 Row {
                                     spacing: 10
+                                    visible: !zoteroSendDialog.mapped
                                     Rectangle {
                                         width: 22; height: 22; radius: 11; border.width: 2; border.color: "black"
                                         Rectangle {
@@ -435,6 +476,7 @@ AFFECT [[1224665461898798997]]
                                 }
                                 Row {
                                     spacing: 10
+                                    visible: !zoteroSendDialog.mapped
                                     Rectangle {
                                         width: 22; height: 22; radius: 11; border.width: 2; border.color: "black"
                                         Rectangle {
@@ -444,37 +486,59 @@ AFFECT [[1224665461898798997]]
                                         MouseArea { anchors.fill: parent; onClicked: zoteroSendDialog.chooseMode("attach") }
                                     }
                                     Text {
-                                        text: zoteroSendDialog.mapped ?
-                                            ("Attach to \"" + zoteroSendDialog.mappedTitle + "\"") :
-                                            "Attach to existing item"
+                                        text: "Attach to existing item"
                                         font.pixelSize: 18
                                         MouseArea { anchors.fill: parent; onClicked: zoteroSendDialog.chooseMode("attach") }
                                     }
                                 }
 
+                                Text {
+                                    text: zoteroSendDialog.mapped ?
+                                        ("Already linked to \"" + zoteroSendDialog.mappedTitle + "\". Choose what new content to send:") :
+                                        "What to send:"
+                                    font.pixelSize: 16; font.bold: true; wrapMode: Text.WordWrap; width: parent.width
+                                }
                                 Row {
                                     spacing: 10
+                                    visible: !zoteroSendDialog.mapped
                                     Rectangle {
                                         width: 22; height: 22; border.width: 2; border.color: "black"
-                                        color: zoteroSendDialog.annotatedOnly ? "black" : "white"
-                                        MouseArea { anchors.fill: parent; onClicked: zoteroSendDialog.toggleAnnotatedOnly() }
+                                        color: zoteroSendDialog.sendPlain ? "black" : "white"
+                                        MouseArea { anchors.fill: parent; onClicked: zoteroSendDialog.toggleSendPlain() }
                                     }
                                     Text {
-                                        text: "Annotations only"; font.pixelSize: 18
-                                        MouseArea { anchors.fill: parent; onClicked: zoteroSendDialog.toggleAnnotatedOnly() }
+                                        text: "Send unmarked PDF"; font.pixelSize: 18
+                                        MouseArea { anchors.fill: parent; onClicked: zoteroSendDialog.toggleSendPlain() }
                                     }
                                 }
                                 Row {
                                     spacing: 10
                                     Rectangle {
                                         width: 22; height: 22; border.width: 2; border.color: "black"
-                                        color: zoteroSendDialog.runReverseSyncNow ? "black" : "white"
-                                        MouseArea { anchors.fill: parent; onClicked: zoteroSendDialog.toggleRunReverseSyncNow() }
+                                        color: zoteroSendDialog.sendMerged ? "black" : "white"
+                                        MouseArea { anchors.fill: parent; onClicked: zoteroSendDialog.toggleSendMerged() }
                                     }
                                     Text {
-                                        text: "Also run reverse sync now"; font.pixelSize: 18
-                                        MouseArea { anchors.fill: parent; onClicked: zoteroSendDialog.toggleRunReverseSyncNow() }
+                                        text: "Send PDF + markup"; font.pixelSize: 18
+                                        MouseArea { anchors.fill: parent; onClicked: zoteroSendDialog.toggleSendMerged() }
                                     }
+                                }
+                                Row {
+                                    spacing: 10
+                                    Rectangle {
+                                        width: 22; height: 22; border.width: 2; border.color: "black"
+                                        color: zoteroSendDialog.sendAnnotatedOnly ? "black" : "white"
+                                        MouseArea { anchors.fill: parent; onClicked: zoteroSendDialog.toggleSendAnnotatedOnly() }
+                                    }
+                                    Text {
+                                        text: "Markup only"; font.pixelSize: 18
+                                        MouseArea { anchors.fill: parent; onClicked: zoteroSendDialog.toggleSendAnnotatedOnly() }
+                                    }
+                                }
+                                Text {
+                                    visible: zoteroSendDialog.mapped
+                                    text: "If there's no new markup on this document, nothing extra will be sent, but tag changes below still apply."
+                                    font.pixelSize: 13; color: "#444444"; wrapMode: Text.WordWrap; width: parent.width
                                 }
 
                                 Text {

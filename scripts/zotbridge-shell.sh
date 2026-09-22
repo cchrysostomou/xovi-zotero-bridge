@@ -140,7 +140,8 @@ if [[ ${1:-} == --help || ${1:-} == -h || $# == 0 ]]; then
       '       zotbridge-run.sh check-connection [--webdav] [--item-key KEY]' \
       '       zotbridge-run.sh doc-status --uuid RM_UUID' \
       '       zotbridge-run.sh doc-tags --uuid RM_UUID' \
-      '       zotbridge-run.sh queue-for-zotero --uuid RM_UUID --mode new|attach [--parent-key KEY] [--collection KEY] [--tags a,b,c] [--annotated-only]'
+      '       zotbridge-run.sh queue-for-zotero --uuid RM_UUID --mode new|attach [--parent-key KEY] [--collection KEY] [--tags a,b,c] [--annotated-only]' \
+      '       zotbridge-run.sh send-to-zotero --uuid RM_UUID --mode new|attach [--parent-key KEY] [--collection KEY] [--tags a,b,c] [--send-plain] [--send-merged] [--send-annotated-only]'
     exit 0
 fi
 COMMAND=$1
@@ -163,6 +164,9 @@ QUEUE_PARENT_KEY=
 QUEUE_TAGS_RAW=
 QUEUE_TAGS=()
 QUEUE_ANNOTATED_ONLY=false
+SEND_PLAIN=false
+SEND_MERGED=false
+SEND_ANNOTATED_ONLY=false
 while (($#)); do
     case "$1" in
         --query|-q) [[ $COMMAND =~ ^(list|tags)$ && $# -ge 2 ]] || fail ValueError "Invalid --query option."; QUERY=$2; shift 2 ;;
@@ -172,7 +176,7 @@ while (($#)); do
             [[ $COMMAND =~ ^(list|sync-tagged|sync-item)$ && $# -ge 2 ]] || fail ValueError "Invalid --tag option."
             if [[ $COMMAND == list ]]; then TAGS+=("$2"); else QUEUE_TAG=$2; QUEUE_TAG_SET=true; fi
             shift 2 ;;
-        --collection|-c) [[ $COMMAND =~ ^(list|queue-for-zotero)$ && $# -ge 2 ]] || fail ValueError "Invalid --collection option."; COLLECTION=$2; shift 2 ;;
+        --collection|-c) [[ $COMMAND =~ ^(list|queue-for-zotero|send-to-zotero)$ && $# -ge 2 ]] || fail ValueError "Invalid --collection option."; COLLECTION=$2; shift 2 ;;
         --synced-tag) [[ $COMMAND =~ ^sync-(tagged|item)$ && $# -ge 2 ]] || fail ValueError "Invalid --synced-tag option."; SYNCED_TAG=$2; SYNCED_TAG_SET=true; shift 2 ;;
         --page-info) [[ $COMMAND == list ]] || fail ValueError "Invalid --page-info option."; PAGE_INFO=true; shift ;;
         --json) [[ $COMMAND =~ ^(list|tags|collections|settings|children)$ ]] || fail ValueError "Invalid --json option."; AS_JSON=true; shift ;;
@@ -184,15 +188,18 @@ while (($#)); do
         --retry-uncertain) [[ $COMMAND == import ]] || fail ValueError "Invalid --retry-uncertain option."; RETRY=true; shift ;;
         --include-zotero-tags) [[ $COMMAND == import ]] || fail ValueError "Invalid --include-zotero-tags option."; INCLUDE_ZOTERO_TAGS=true; shift ;;
         --add-unread-tag) [[ $COMMAND == import ]] || fail ValueError "Invalid --add-unread-tag option."; ADD_UNREAD_TAG=true; shift ;;
-        --uuid) [[ $COMMAND =~ ^(doc-status|doc-tags|queue-for-zotero)$ && $# -ge 2 ]] || fail ValueError "Invalid --uuid option."; UUID_OPT=$2; shift 2 ;;
-        --mode) [[ $COMMAND == queue-for-zotero && $# -ge 2 ]] || fail ValueError "Invalid --mode option."; QUEUE_MODE=$2; shift 2 ;;
-        --parent-key) [[ $COMMAND == queue-for-zotero && $# -ge 2 ]] || fail ValueError "Invalid --parent-key option."; QUEUE_PARENT_KEY=$2; shift 2 ;;
-        --tags) [[ $COMMAND == queue-for-zotero && $# -ge 2 ]] || fail ValueError "Invalid --tags option."; QUEUE_TAGS_RAW=$2; shift 2 ;;
+        --uuid) [[ $COMMAND =~ ^(doc-status|doc-tags|queue-for-zotero|send-to-zotero)$ && $# -ge 2 ]] || fail ValueError "Invalid --uuid option."; UUID_OPT=$2; shift 2 ;;
+        --mode) [[ $COMMAND =~ ^(queue-for-zotero|send-to-zotero)$ && $# -ge 2 ]] || fail ValueError "Invalid --mode option."; QUEUE_MODE=$2; shift 2 ;;
+        --parent-key) [[ $COMMAND =~ ^(queue-for-zotero|send-to-zotero)$ && $# -ge 2 ]] || fail ValueError "Invalid --parent-key option."; QUEUE_PARENT_KEY=$2; shift 2 ;;
+        --tags) [[ $COMMAND =~ ^(queue-for-zotero|send-to-zotero)$ && $# -ge 2 ]] || fail ValueError "Invalid --tags option."; QUEUE_TAGS_RAW=$2; shift 2 ;;
         --annotated-only) [[ $COMMAND == queue-for-zotero ]] || fail ValueError "Invalid --annotated-only option."; QUEUE_ANNOTATED_ONLY=true; shift ;;
+        --send-plain) [[ $COMMAND == send-to-zotero ]] || fail ValueError "Invalid --send-plain option."; SEND_PLAIN=true; shift ;;
+        --send-merged) [[ $COMMAND == send-to-zotero ]] || fail ValueError "Invalid --send-merged option."; SEND_MERGED=true; shift ;;
+        --send-annotated-only) [[ $COMMAND == send-to-zotero ]] || fail ValueError "Invalid --send-annotated-only option."; SEND_ANNOTATED_ONLY=true; shift ;;
         *) fail ValueError "Unknown command option. Use --help." ;;
     esac
 done
-[[ $COMMAND =~ ^(list|tags|collections|clear-mappings|settings|settings-apply|activity-log|clear-activity-log|check-connection|ensure-folder|import|status|library|sync-tagged|sync-item|reverse-sync|sync-all|children|doc-status|doc-tags|queue-for-zotero)$ ]] || fail ValueError "Unknown command. Use --help."
+[[ $COMMAND =~ ^(list|tags|collections|clear-mappings|settings|settings-apply|activity-log|clear-activity-log|check-connection|ensure-folder|import|status|library|sync-tagged|sync-item|reverse-sync|sync-all|children|doc-status|doc-tags|queue-for-zotero|send-to-zotero)$ ]] || fail ValueError "Unknown command. Use --help."
 if [[ $COMMAND == tags || $COMMAND == collections || $COMMAND == clear-mappings ]]; then
     for dependency in flock mv; do
         command -v "$dependency" >/dev/null || fail missing_dependency "JSON state operations require utility: $dependency."
@@ -219,12 +226,12 @@ fi
     fail ValueError "attachment-key must contain exactly eight uppercase letters or digits."
 [[ -z $COLLECTION ]] || [[ $COLLECTION =~ ^[A-Z0-9]{8}$ ]] ||
     fail ValueError "collection must contain exactly eight uppercase letters or digits."
-if [[ $COMMAND =~ ^(doc-status|doc-tags|queue-for-zotero)$ ]]; then
+if [[ $COMMAND =~ ^(doc-status|doc-tags|queue-for-zotero|send-to-zotero)$ ]]; then
     [[ $UUID_OPT =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]] ||
         fail ValueError "uuid must be a canonical reMarkable document UUID."
     UUID_OPT=${UUID_OPT,,}
 fi
-if [[ $COMMAND == queue-for-zotero ]]; then
+if [[ $COMMAND =~ ^(queue-for-zotero|send-to-zotero)$ ]]; then
     [[ $QUEUE_MODE =~ ^(new|attach)$ ]] ||
         fail ValueError "mode must be new or attach."
     if [[ $QUEUE_MODE == attach ]]; then
@@ -246,6 +253,13 @@ if [[ $COMMAND == queue-for-zotero ]]; then
     for dependency in flock find md5sum sha256sum cut tr cp grep mv; do
         command -v "$dependency" >/dev/null || fail missing_dependency "Sending a document to Zotero requires utility: $dependency."
     done
+fi
+if [[ $COMMAND == send-to-zotero ]]; then
+    # A tags-only call (zero --send-* flags, --tags present) is allowed: it
+    # updates an already-mapped item's tags without sending any new
+    # attachment content, for a mapped document with no markup selected.
+    [[ $SEND_PLAIN == true || $SEND_MERGED == true || $SEND_ANNOTATED_ONLY == true || -n $QUEUE_TAGS_RAW ]] ||
+        fail ValueError "send-to-zotero requires at least one of --send-plain, --send-merged, --send-annotated-only or --tags."
 fi
 if [[ $COMMAND == import || $COMMAND == sync-* || ($COMMAND == check-connection && -n $ITEM_KEY) ]]; then
     for dependency in unzip dd mv; do
@@ -951,6 +965,11 @@ case "$COMMAND" in
     queue-for-zotero)
         ACTIVITY_LOGGED=true
         queue_for_zotero "$UUID_OPT" "$QUEUE_MODE" "$QUEUE_PARENT_KEY" "$COLLECTION" "$QUEUE_TAGS_RAW" "$QUEUE_ANNOTATED_ONLY"
+        ;;
+    send-to-zotero)
+        ACTIVITY_LOGGED=true
+        send_to_zotero "$UUID_OPT" "$QUEUE_MODE" "$QUEUE_PARENT_KEY" "$COLLECTION" "$QUEUE_TAGS_RAW" \
+          "$SEND_PLAIN" "$SEND_MERGED" "$SEND_ANNOTATED_ONLY" || { ACTIVITY_LOGGED=true; exit 1; }
         ;;
     clear-mappings) clear_state_mappings ;;
     ensure-folder)

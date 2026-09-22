@@ -1302,6 +1302,96 @@ class ShellSmokeTests(unittest.TestCase):
         state = json.loads((self.root / "state.db.json").read_text())
         self.assertEqual(state["mappings"][uuid]["zotero_item_key"], "ITEM1234")
 
+    def test_send_to_zotero_requires_at_least_one_variant(self):
+        uuid = "cc4c1d9d-a04a-4f6e-bb08-d6f54cde88b8"
+        result = self.run_cli("send-to-zotero", "--uuid", uuid, "--mode", "new")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(json.loads(result.stdout)["error"], "ValueError")
+
+    def test_send_to_zotero_validates_mode_and_related_options(self):
+        uuid = "cc4c1d9d-a04a-4f6e-bb08-d6f54cde88b8"
+        cases = [
+            (["--uuid", uuid, "--mode", "bogus", "--send-plain"], "ValueError"),
+            (["--uuid", uuid, "--mode", "attach", "--send-plain"], "ValueError"),
+            (["--uuid", uuid, "--mode", "new", "--parent-key", "ITEM1234", "--send-plain"], "ValueError"),
+            (["--uuid", uuid, "--mode", "attach", "--parent-key", "ITEM1234",
+              "--collection", "COLL1234", "--send-plain"], "ValueError"),
+            (["--uuid", "not-a-uuid", "--mode", "new", "--send-plain"], "ValueError"),
+        ]
+        for args, expected_error in cases:
+            with self.subTest(args=args):
+                result = self.run_cli("send-to-zotero", *args)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(json.loads(result.stdout)["error"], expected_error)
+
+    def test_send_to_zotero_rejects_missing_or_non_pdf_document(self):
+        uuid = "cc4c1d9d-a04a-4f6e-bb08-d6f54cde88b8"
+        self.library = self.root / "library"
+        self.library.mkdir()
+        with self.config.open("a") as config:
+            config.write(f'xochitl_dir = "{self.library}"\n')
+            config.write('reverse_sync_folder = "Zotero"\n')
+        self.install_stub_localgeta_and_seven_zip()
+        # zotbridge-shell.sh already checked --send-plain-or-similar presence and
+        # webdav/library configuration before this point can be reached; here we
+        # confirm send_to_zotero's own document existence/type checks.
+        missing = self.run_cli("send-to-zotero", "--uuid", uuid, "--mode", "new", "--send-plain")
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertEqual(json.loads(missing.stdout)["error"], "FileNotFoundError")
+        self.setup_library_document(uuid)
+        (self.library / f"{uuid}.content").write_text(json.dumps({"fileType": "epub"}))
+        (self.library / f"{uuid}.pdf").write_bytes(b"not actually used")
+        not_pdf = self.run_cli("send-to-zotero", "--uuid", uuid, "--mode", "new", "--send-plain")
+        self.assertNotEqual(not_pdf.returncode, 0)
+        self.assertEqual(json.loads(not_pdf.stdout)["error"], "unsupported_export")
+
+    def test_send_to_zotero_rejects_invalid_attach_parent(self):
+        uuid = "cc4c1d9d-a04a-4f6e-bb08-d6f54cde88b8"
+        self.setup_pdf_library_document(uuid)
+        self.install_stub_localgeta_and_seven_zip()
+        result = self.run_cli("send-to-zotero", "--uuid", uuid, "--mode", "attach",
+                               "--parent-key", "HOSTED12", "--send-plain")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(json.loads(result.stdout)["error"], "ValueError")
+
+    def test_send_to_zotero_requires_localgeta_only_for_markup_variants(self):
+        uuid = "cc4c1d9d-a04a-4f6e-bb08-d6f54cde88b8"
+        self.setup_pdf_library_document(uuid)
+        seven_zip = self.bin / "7zz"
+        seven_zip.write_text("#!/bin/sh\nexit 1\n")
+        seven_zip.chmod(0o755)
+        self.env["ZOTBRIDGE_7ZZ"] = str(seven_zip)
+        merged = self.run_cli("send-to-zotero", "--uuid", uuid, "--mode", "new", "--send-merged")
+        self.assertNotEqual(merged.returncode, 0)
+        self.assertEqual(json.loads(merged.stdout)["error"], "missing_dependency")
+
+    def test_send_to_zotero_skips_markup_variants_without_uploading_when_no_annotations(self):
+        uuid = "cc4c1d9d-a04a-4f6e-bb08-d6f54cde88b8"
+        self.setup_pdf_library_document(uuid)
+        self.configure_broker()
+        local_geta = self.bin / "zotbridge-localgeta"
+        local_geta.write_text(
+            "#!/bin/sh\n"
+            'for arg do case "$prev" in -output) out=$arg;; esac; prev=$arg; done\n'
+            'printf "%%PDF-1.7\\nExported\\n" >"$out"\n'
+        )
+        local_geta.chmod(0o755)
+        self.env["ZOTBRIDGE_LOCALGETA"] = str(local_geta)
+        seven_zip = self.bin / "7zz"
+        seven_zip.write_text("#!/bin/sh\nexit 1\n")
+        seven_zip.chmod(0o755)
+        self.env["ZOTBRIDGE_7ZZ"] = str(seven_zip)
+        with self.broker_reply([b""]):
+            result = self.run_cli("send-to-zotero", "--uuid", uuid, "--mode", "new", "--send-merged")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(result.stdout)
+        self.assertTrue(data["ok"])
+        self.assertIsNone(data["zotero_item_key"])
+        self.assertEqual(data["variants"], [{"variant": "merged", "status": "skipped_no_markup"}])
+        self.assertFalse(data["tags_updated"])
+        self.assertFalse(self.requests.exists())
+        self.assertFalse((self.root / "state.db.json").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
