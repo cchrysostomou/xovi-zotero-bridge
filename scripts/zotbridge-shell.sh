@@ -929,9 +929,15 @@ case "$COMMAND" in
     clear-activity-log) clear_activity_log ;;
     sync-tagged) sync_tagged || { ACTIVITY_LOGGED=true; exit 1; } ;;
     reverse-sync)
-        reverse_sync >"$WORK/reverse-command-result.json"
-        "$JQ" '.' "$WORK/reverse-command-result.json"
-        "$JQ" -e '.ok' "$WORK/reverse-command-result.json" >/dev/null ||
+        # Captured via command substitution (a subshell) rather than redirected to a
+        # WORK file: fail() calls exit, which would otherwise only terminate the whole
+        # process before this case block could print the WORK file back out, leaving
+        # any internal failure (e.g. broker unavailable) completely silent on stdout.
+        reverse_result="$(reverse_sync)" || true
+        [[ -n $reverse_result ]] ||
+          reverse_result='{"ok":false,"error":"runtime_error","message":"reverse-sync produced no output; check the activity log."}'
+        printf '%s\n' "$reverse_result" | "$JQ" '.'
+        printf '%s\n' "$reverse_result" | "$JQ" -e '.ok' >/dev/null ||
           { ACTIVITY_LOGGED=true; exit 1; }
         ACTIVITY_LOGGED=true
         ;;

@@ -268,6 +268,37 @@ class ShellSmokeTests(unittest.TestCase):
         self.assertIn('reverse_sync_folder = "Zotero/Read and annotated"', saved)
         self.assertNotIn("password-secret", applied.stdout)
 
+    def test_reverse_sync_reports_broker_unavailable_instead_of_silent_failure(self):
+        # Regression test: reverse-sync used to redirect its stdout to a WORK file
+        # that was deleted before an internal fail() (e.g. broker unreachable) could
+        # ever be printed, so the command exited nonzero with completely empty
+        # stdout/stderr. It must now surface the JSON error normally.
+        self.install_stub_localgeta_and_seven_zip()
+        with self.config.open("a") as config:
+            config.write('reverse_sync_folder = "Zotero"\n')
+        result = self.run_cli("reverse-sync")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(result.stdout.strip(), "reverse-sync must not fail silently")
+        data = json.loads(result.stdout)
+        self.assertEqual(data["ok"], False)
+        self.assertEqual(data["error"], "ValueError")
+        self.assertIn("FIFOs", data["message"])
+
+    def test_sync_all_reports_broker_unavailable_instead_of_silent_failure(self):
+        # Regression test for the same silent-failure pattern inside sync_all()'s
+        # internal reverse_sync call.
+        self.install_stub_localgeta_and_seven_zip()
+        with self.config.open("a") as config:
+            config.write('reverse_sync_folder = "Zotero"\ndefault_target_folder = "Zotero"\n'
+                         'sync_queue_tag = "waiting"\nsync_synced_tag = "complete"\n')
+        result = self.run_cli("sync-all")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(result.stdout.strip(), "sync-all must not fail silently")
+        data = json.loads(result.stdout)
+        self.assertEqual(data["ok"], False)
+        self.assertEqual(data["reverse"]["error"], "ValueError")
+        self.assertIn("FIFOs", data["reverse"]["message"])
+
     def test_reverse_sync_retains_unexportable_document_and_logs_stage(self):
         self.prepare_import()
         uuid = self.document.decode()

@@ -452,10 +452,21 @@ reverse_sync() {
 
 sync_all() {
     local reverse_status=0 forward_status=0 forward_target=$TARGET
-    reverse_sync >"$WORK/reverse-result.json"
+    # See the reverse-sync case dispatch in zotbridge-shell.sh for why this must be a
+    # command substitution (a subshell) rather than a redirect to a WORK file: fail()
+    # exits the whole process, so a redirect would silently swallow the JSON error.
+    local reverse_result
+    reverse_result="$(reverse_sync)" || true
+    [[ -n $reverse_result ]] ||
+      reverse_result='{"ok":false,"error":"runtime_error","message":"reverse-sync produced no output; check the activity log."}'
+    printf '%s\n' "$reverse_result" >"$WORK/reverse-result.json"
     "$JQ" -e '.ok' "$WORK/reverse-result.json" >/dev/null || reverse_status=1
     TARGET=$forward_target
-    sync_tagged >"$WORK/forward-result.json" || forward_status=$?
+    local forward_result
+    forward_result="$(sync_tagged)" || forward_status=$?
+    [[ -n $forward_result ]] ||
+      forward_result='{"ok":false,"error":"runtime_error","message":"sync-tagged produced no output; check the activity log."}'
+    printf '%s\n' "$forward_result" >"$WORK/forward-result.json"
     "$JQ" -cn --slurpfile reverse "$WORK/reverse-result.json" --slurpfile forward "$WORK/forward-result.json" \
       --argjson reverse_status "$reverse_status" --argjson forward_status "$forward_status" '
       {ok:($reverse_status==0 and $forward_status==0),reverse:$reverse[0],forward:$forward[0],
