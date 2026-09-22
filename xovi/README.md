@@ -51,7 +51,7 @@ reader. Tapping it opens a full-screen dialog to send the open document to
 Zotero as a new item, a new version attached to an existing item, or an
 overwrite of the item it is already linked to, with reMarkable tags offered as
 checkboxes to include. It calls the existing `doc-status`, `doc-tags`, and
-`push-document` bridge commands and needs no new backend code.
+`queue-for-zotero` bridge commands and needs no new backend code.
 
 ```sh
 cp xovi/3.28/zoteroSendToZotero.qmd \
@@ -101,13 +101,10 @@ Restart XOVI afterward to load the QMD changes and AppLoad's app list.
 
 The 3.28 Settings app sidebar gains **Zotero Bridge**. It edits the WebDAV URL,
 username, password replacement, default reMarkable folder, and queue/completion
-tags. It also reports whether the bundled rmapi is paired with reMarkable Cloud
-and accepts the eight-character code generated at
-`my.remarkable.com/device/browser/connect`. Pairing uses a short-lived private
-draft; the code field is cleared immediately, and neither the code nor cloud
-tokens are returned to QML or recorded in the activity log. The pairing status is
-shown independently. **Pair** creates the first pairing; **Re-pair** safely
-replaces an existing token only after the new cloud credentials are verified.
+tags. There is no reMarkable Cloud pairing step: reverse synchronization reads
+directly from the on-device xochitl library and merges annotations locally with
+the bundled `zotbridge-localgeta` binary, so no cloud account or one-time code
+is ever needed.
 The **reMarkable source folder** setting defaults to `Zotero/Read` and will be
 used by reverse synchronization.
 

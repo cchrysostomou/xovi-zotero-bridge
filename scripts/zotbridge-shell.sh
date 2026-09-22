@@ -23,9 +23,7 @@ STATE_STAGE=
 ACTIVITY_LOG=
 ACTIVITY_READY=false
 ACTIVITY_LOGGED=false
-RMAPI=
-RMAPI_CONFIG=
-RMAPI_PAIR_DRAFT=
+LOCALGETA=
 SEVEN_ZIP=
 
 activity_event() {
@@ -129,9 +127,6 @@ if [[ ${1:-} == --help || ${1:-} == -h || $# == 0 ]]; then
       '       zotbridge-run.sh clear-mappings' \
       '       zotbridge-run.sh settings [--json]' \
       '       zotbridge-run.sh settings-apply' \
-      '       zotbridge-run.sh rmapi-status' \
-      '       zotbridge-run.sh rmapi-pair' \
-      '       zotbridge-run.sh rmapi-repair' \
       '       zotbridge-run.sh activity-log' \
       '       zotbridge-run.sh clear-activity-log' \
       '       zotbridge-run.sh children --item-key KEY [--json]' \
@@ -145,7 +140,7 @@ if [[ ${1:-} == --help || ${1:-} == -h || $# == 0 ]]; then
       '       zotbridge-run.sh check-connection [--webdav] [--item-key KEY]' \
       '       zotbridge-run.sh doc-status --uuid RM_UUID' \
       '       zotbridge-run.sh doc-tags --uuid RM_UUID' \
-      '       zotbridge-run.sh push-document --uuid RM_UUID --mode new|attach|overwrite [--parent-key KEY] [--collection KEY] [--tags a,b,c]'
+      '       zotbridge-run.sh queue-for-zotero --uuid RM_UUID --mode new|attach [--parent-key KEY] [--collection KEY] [--tags a,b,c] [--annotated-only]'
     exit 0
 fi
 COMMAND=$1
@@ -163,10 +158,11 @@ INCLUDE_ZOTERO_TAGS=false
 ADD_UNREAD_TAG=false
 TAGS=()
 UUID_OPT=
-PUSH_MODE=
-PUSH_PARENT_KEY=
-PUSH_TAGS_RAW=
-PUSH_TAGS=()
+QUEUE_MODE=
+QUEUE_PARENT_KEY=
+QUEUE_TAGS_RAW=
+QUEUE_TAGS=()
+QUEUE_ANNOTATED_ONLY=false
 while (($#)); do
     case "$1" in
         --query|-q) [[ $COMMAND =~ ^(list|tags)$ && $# -ge 2 ]] || fail ValueError "Invalid --query option."; QUERY=$2; shift 2 ;;
@@ -176,7 +172,7 @@ while (($#)); do
             [[ $COMMAND =~ ^(list|sync-tagged|sync-item)$ && $# -ge 2 ]] || fail ValueError "Invalid --tag option."
             if [[ $COMMAND == list ]]; then TAGS+=("$2"); else QUEUE_TAG=$2; QUEUE_TAG_SET=true; fi
             shift 2 ;;
-        --collection|-c) [[ $COMMAND =~ ^(list|push-document)$ && $# -ge 2 ]] || fail ValueError "Invalid --collection option."; COLLECTION=$2; shift 2 ;;
+        --collection|-c) [[ $COMMAND =~ ^(list|queue-for-zotero)$ && $# -ge 2 ]] || fail ValueError "Invalid --collection option."; COLLECTION=$2; shift 2 ;;
         --synced-tag) [[ $COMMAND =~ ^sync-(tagged|item)$ && $# -ge 2 ]] || fail ValueError "Invalid --synced-tag option."; SYNCED_TAG=$2; SYNCED_TAG_SET=true; shift 2 ;;
         --page-info) [[ $COMMAND == list ]] || fail ValueError "Invalid --page-info option."; PAGE_INFO=true; shift ;;
         --json) [[ $COMMAND =~ ^(list|tags|collections|settings|children)$ ]] || fail ValueError "Invalid --json option."; AS_JSON=true; shift ;;
@@ -188,14 +184,15 @@ while (($#)); do
         --retry-uncertain) [[ $COMMAND == import ]] || fail ValueError "Invalid --retry-uncertain option."; RETRY=true; shift ;;
         --include-zotero-tags) [[ $COMMAND == import ]] || fail ValueError "Invalid --include-zotero-tags option."; INCLUDE_ZOTERO_TAGS=true; shift ;;
         --add-unread-tag) [[ $COMMAND == import ]] || fail ValueError "Invalid --add-unread-tag option."; ADD_UNREAD_TAG=true; shift ;;
-        --uuid) [[ $COMMAND =~ ^(doc-status|doc-tags|push-document)$ && $# -ge 2 ]] || fail ValueError "Invalid --uuid option."; UUID_OPT=$2; shift 2 ;;
-        --mode) [[ $COMMAND == push-document && $# -ge 2 ]] || fail ValueError "Invalid --mode option."; PUSH_MODE=$2; shift 2 ;;
-        --parent-key) [[ $COMMAND == push-document && $# -ge 2 ]] || fail ValueError "Invalid --parent-key option."; PUSH_PARENT_KEY=$2; shift 2 ;;
-        --tags) [[ $COMMAND == push-document && $# -ge 2 ]] || fail ValueError "Invalid --tags option."; PUSH_TAGS_RAW=$2; shift 2 ;;
+        --uuid) [[ $COMMAND =~ ^(doc-status|doc-tags|queue-for-zotero)$ && $# -ge 2 ]] || fail ValueError "Invalid --uuid option."; UUID_OPT=$2; shift 2 ;;
+        --mode) [[ $COMMAND == queue-for-zotero && $# -ge 2 ]] || fail ValueError "Invalid --mode option."; QUEUE_MODE=$2; shift 2 ;;
+        --parent-key) [[ $COMMAND == queue-for-zotero && $# -ge 2 ]] || fail ValueError "Invalid --parent-key option."; QUEUE_PARENT_KEY=$2; shift 2 ;;
+        --tags) [[ $COMMAND == queue-for-zotero && $# -ge 2 ]] || fail ValueError "Invalid --tags option."; QUEUE_TAGS_RAW=$2; shift 2 ;;
+        --annotated-only) [[ $COMMAND == queue-for-zotero ]] || fail ValueError "Invalid --annotated-only option."; QUEUE_ANNOTATED_ONLY=true; shift ;;
         *) fail ValueError "Unknown command option. Use --help." ;;
     esac
 done
-[[ $COMMAND =~ ^(list|tags|collections|clear-mappings|settings|settings-apply|rmapi-status|rmapi-pair|rmapi-repair|activity-log|clear-activity-log|check-connection|ensure-folder|import|status|library|sync-tagged|sync-item|reverse-sync|sync-all|children|doc-status|doc-tags|push-document)$ ]] || fail ValueError "Unknown command. Use --help."
+[[ $COMMAND =~ ^(list|tags|collections|clear-mappings|settings|settings-apply|activity-log|clear-activity-log|check-connection|ensure-folder|import|status|library|sync-tagged|sync-item|reverse-sync|sync-all|children|doc-status|doc-tags|queue-for-zotero)$ ]] || fail ValueError "Unknown command. Use --help."
 if [[ $COMMAND == tags || $COMMAND == collections || $COMMAND == clear-mappings ]]; then
     for dependency in flock mv; do
         command -v "$dependency" >/dev/null || fail missing_dependency "JSON state operations require utility: $dependency."
@@ -222,26 +219,28 @@ fi
     fail ValueError "attachment-key must contain exactly eight uppercase letters or digits."
 [[ -z $COLLECTION ]] || [[ $COLLECTION =~ ^[A-Z0-9]{8}$ ]] ||
     fail ValueError "collection must contain exactly eight uppercase letters or digits."
-if [[ $COMMAND =~ ^(doc-status|doc-tags|push-document)$ ]]; then
+if [[ $COMMAND =~ ^(doc-status|doc-tags|queue-for-zotero)$ ]]; then
     [[ $UUID_OPT =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]] ||
         fail ValueError "uuid must be a canonical reMarkable document UUID."
     UUID_OPT=${UUID_OPT,,}
 fi
-if [[ $COMMAND == push-document ]]; then
-    [[ $PUSH_MODE =~ ^(new|attach|overwrite)$ ]] || fail ValueError "mode must be new, attach or overwrite."
-    if [[ $PUSH_MODE == attach ]]; then
-        [[ $PUSH_PARENT_KEY =~ ^[A-Z0-9]{8}$ ]] || fail ValueError "attach mode requires --parent-key KEY."
+if [[ $COMMAND == queue-for-zotero ]]; then
+    [[ $QUEUE_MODE =~ ^(new|attach)$ ]] ||
+        fail ValueError "mode must be new or attach."
+    if [[ $QUEUE_MODE == attach ]]; then
+        [[ $QUEUE_PARENT_KEY =~ ^[A-Z0-9]{8}$ ]] || fail ValueError "attach mode requires --parent-key KEY."
     else
-        [[ -z $PUSH_PARENT_KEY ]] || fail ValueError "--parent-key is only valid with --mode attach."
+        [[ -z $QUEUE_PARENT_KEY ]] || fail ValueError "--parent-key is only valid with --mode attach."
     fi
-    [[ -z $COLLECTION || $PUSH_MODE == new ]] || fail ValueError "--collection is only valid with --mode new."
-    if [[ -n $PUSH_TAGS_RAW ]]; then
-        [[ $PUSH_TAGS_RAW != ,* && $PUSH_TAGS_RAW != *, && $PUSH_TAGS_RAW != *,,* ]] ||
+    [[ -z $COLLECTION || $QUEUE_MODE == new ]] ||
+        fail ValueError "--collection is only valid with --mode new."
+    if [[ -n $QUEUE_TAGS_RAW ]]; then
+        [[ $QUEUE_TAGS_RAW != ,* && $QUEUE_TAGS_RAW != *, && $QUEUE_TAGS_RAW != *,,* ]] ||
             fail ValueError "tags must be a comma-separated list of nonempty tags without control characters."
-        IFS=',' read -r -a PUSH_TAGS <<<"$PUSH_TAGS_RAW"
+        IFS=',' read -r -a QUEUE_TAGS <<<"$QUEUE_TAGS_RAW"
         "$JQ" -ne --args '$ARGS.positional | length>0 and all(.[];
           length>0 and (contains(",")|not) and (test("[\u0000-\u001f\u007f]")|not))' \
-          -- "${PUSH_TAGS[@]}" >/dev/null ||
+          -- "${QUEUE_TAGS[@]}" >/dev/null ||
             fail ValueError "tags must be a comma-separated list of nonempty tags without control characters."
     fi
     for dependency in flock find md5sum sha256sum cut tr cp grep mv; do
@@ -292,11 +291,11 @@ mkdir -p -- "$(dirname -- "$ACTIVITY_LOG")" ||
     fail activity_log_error "Cannot create the activity log directory."
 ACTIVITY_READY=true
 [[ $COMMAND =~ ^(sync-tagged|reverse-sync|sync-all)$ ]] || activity_event started
-if [[ -n ${ZOTBRIDGE_RMAPI:-} ]]; then
-    [[ -x $ZOTBRIDGE_RMAPI ]] || fail missing_dependency "ZOTBRIDGE_RMAPI must name an executable rmapi binary."
-    RMAPI=$ZOTBRIDGE_RMAPI
-elif [[ -x $ROOT_DIR/bin/rmapi ]]; then
-    RMAPI="$ROOT_DIR/bin/rmapi"
+if [[ -n ${ZOTBRIDGE_LOCALGETA:-} ]]; then
+    [[ -x $ZOTBRIDGE_LOCALGETA ]] || fail missing_dependency "ZOTBRIDGE_LOCALGETA must name an executable zotbridge-localgeta binary."
+    LOCALGETA=$ZOTBRIDGE_LOCALGETA
+elif [[ -x $ROOT_DIR/bin/zotbridge-localgeta ]]; then
+    LOCALGETA="$ROOT_DIR/bin/zotbridge-localgeta"
 fi
 if [[ -n ${ZOTBRIDGE_7ZZ:-} ]]; then
     [[ -x $ZOTBRIDGE_7ZZ ]] || fail missing_dependency "ZOTBRIDGE_7ZZ must name an executable 7zz binary."
@@ -304,8 +303,6 @@ if [[ -n ${ZOTBRIDGE_7ZZ:-} ]]; then
 elif [[ -x $ROOT_DIR/bin/7zz ]]; then
     SEVEN_ZIP="$ROOT_DIR/bin/7zz"
 fi
-RMAPI_CONFIG="${ZOTBRIDGE_RMAPI_CONFIG:-$ROOT_DIR/.rmapi}"
-RMAPI_PAIR_DRAFT="${ZOTBRIDGE_RMAPI_PAIR_DRAFT:-$ROOT_DIR/.zotbridge-rmapi-pair-draft.json}"
 absolute_path "$(get_config mb_in_path)"; MB_IN=$REPLY
 absolute_path "$(get_config mb_out_path)"; MB_OUT=$REPLY
 absolute_path "$(get_config xochitl_dir)"; LIBRARY=$REPLY
@@ -431,56 +428,8 @@ clear_activity_log() {
     ACTIVITY_LOGGED=true
     "$JQ" -cn --argjson cleared "$cleared" '{ok:true,cleared:$cleared}'
 }
-rmapi_paired() {
-    [[ -n $RMAPI && -f $RMAPI_CONFIG && ! -L $RMAPI_CONFIG && -s $RMAPI_CONFIG ]]
-}
-print_rmapi_status() {
-    local installed=false paired=false
-    [[ -n $RMAPI ]] && installed=true
-    rmapi_paired && paired=true
-    "$JQ" -cn --argjson installed "$installed" --argjson paired "$paired" \
-      '{ok:true,rmapi:{installed:$installed,paired:$paired}}'
-}
 show_settings() {
-    local installed=false paired=false
-    [[ -n $RMAPI ]] && installed=true
-    rmapi_paired && paired=true
-    "$JQ" --arg mode public --argjson draft '[]' -cf "$ROOT_DIR/scripts/zotbridge-shell-settings.jq" "$WORK/config.json" |
-      "$JQ" -c --argjson installed "$installed" --argjson paired "$paired" \
-        '. + {rmapi:{installed:$installed,paired:$paired}}'
-}
-pair_rmapi() {
-    local replace=${1:-false} code= candidate="$WORK/rmapi-config" output="$WORK/rmapi-pair-output"
-    [[ ! -L $RMAPI_CONFIG && ! -L $RMAPI_PAIR_DRAFT ]] ||
-      fail rmapi_pair_error "rmapi configuration and pairing draft must not be symbolic links."
-    [[ -f $RMAPI_PAIR_DRAFT ]] || fail rmapi_pair_error "Missing rmapi pairing draft."
-    if [[ -z $RMAPI ]]; then
-        rm -f -- "$RMAPI_PAIR_DRAFT"
-        fail missing_dependency "The bundled rmapi binary is required for reMarkable Cloud pairing."
-    fi
-    if [[ -e $RMAPI_CONFIG && $replace != true ]]; then
-        rm -f -- "$RMAPI_PAIR_DRAFT"
-        fail already_paired "rmapi is already paired; resetting it must be an explicit separate operation."
-    fi
-    code="$("$JQ" -rse '
-      if length==1 and (.[0]|type=="object" and .version==1
-        and (.code|type=="string" and test("^[A-Za-z0-9]{8}$"))
-        and ((keys|sort)==["code","version"]))
-      then .[0].code else error("invalid pairing draft") end' "$RMAPI_PAIR_DRAFT")" || {
-        rm -f -- "$RMAPI_PAIR_DRAFT"
-        fail rmapi_pair_error "Pairing code must contain exactly eight letters or digits."
-    }
-    rm -f -- "$RMAPI_PAIR_DRAFT"
-    (
-      printf '%s\n' "$code" |
-        RMAPI_CONFIG="$candidate" "$RMAPI" ls >"$output" 2>/dev/null
-    ) || fail rmapi_pair_error "reMarkable Cloud pairing failed. Generate a new one-time code and retry."
-    [[ -f $candidate && ! -L $candidate && -s $candidate ]] ||
-      fail rmapi_pair_error "rmapi did not create a valid private configuration."
-    chmod 600 "$candidate"
-    mv -f -- "$candidate" "$RMAPI_CONFIG"
-    ACTIVITY_LOGGED=true
-    printf '%s\n' '{"ok":true,"rmapi":{"installed":true,"paired":true}}'
+    "$JQ" --arg mode public --argjson draft '[]' -cf "$ROOT_DIR/scripts/zotbridge-shell-settings.jq" "$WORK/config.json"
 }
 apply_settings() {
     local draft="$CONFIG_DIR/.zotbridge-settings-draft.json" stage=
@@ -944,7 +893,10 @@ doc_tags() {
       "$metadata_path" >/dev/null ||
         fail FileNotFoundError "That reMarkable UUID is not an active document."
     "$JQ" -c --arg uuid "$uuid" '{ok:true,rm_uuid:$uuid,
-      tags:((.tags // [])|map(select(type=="string"))|unique)}' "$metadata_path" ||
+      rm_title:(.visibleName // ""),
+      tags:((.tags // [])
+        | map(if type=="object" then (.name // empty) elif type=="string" then . else empty end)
+        | map(select(length>0)) | unique)}' "$metadata_path" ||
         fail state_error "reMarkable document metadata could not be read."
 }
 
@@ -973,9 +925,6 @@ source "$ROOT_DIR/scripts/zotbridge-shell-reverse.sh"
 case "$COMMAND" in
     settings) ACTIVITY_LOGGED=true; show_settings ;;
     settings-apply) apply_settings ;;
-    rmapi-status) ACTIVITY_LOGGED=true; print_rmapi_status ;;
-    rmapi-pair) pair_rmapi false ;;
-    rmapi-repair) pair_rmapi true ;;
     activity-log) ACTIVITY_LOGGED=true; print_activity_log ;;
     clear-activity-log) clear_activity_log ;;
     sync-tagged) sync_tagged || { ACTIVITY_LOGGED=true; exit 1; } ;;
@@ -993,11 +942,9 @@ case "$COMMAND" in
     sync-item) sync_item ;;
     doc-status) ACTIVITY_LOGGED=true; doc_status "$UUID_OPT" ;;
     doc-tags) ACTIVITY_LOGGED=true; doc_tags "$UUID_OPT" ;;
-    push-document)
-        push_document "$UUID_OPT" "$PUSH_MODE" "$PUSH_PARENT_KEY" >"$WORK/push-command-result.json" || :
-        "$JQ" '.' "$WORK/push-command-result.json"
-        "$JQ" -e '.ok' "$WORK/push-command-result.json" >/dev/null || { ACTIVITY_LOGGED=true; exit 1; }
+    queue-for-zotero)
         ACTIVITY_LOGGED=true
+        queue_for_zotero "$UUID_OPT" "$QUEUE_MODE" "$QUEUE_PARENT_KEY" "$COLLECTION" "$QUEUE_TAGS_RAW" "$QUEUE_ANNOTATED_ONLY"
         ;;
     clear-mappings) clear_state_mappings ;;
     ensure-folder)

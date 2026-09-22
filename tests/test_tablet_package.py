@@ -32,9 +32,10 @@ class TabletPackageTests(unittest.TestCase):
                 "scripts/zotbridge-shell-sync.sh",
                 "scripts/zotbridge-shell-reverse.sh",
                 "scripts/zotbridge-shell-settings.jq",
-                "bin/jq", "bin/rmapi", "bin/7zz", "config.example.toml", "README.md",
+                "bin/jq", "bin/zotbridge-localgeta", "bin/7zz", "config.example.toml", "README.md",
                 "licenses/jq-COPYING", "licenses/oniguruma-COPYING", "licenses/musl-COPYRIGHT",
                 "licenses/rmapi-AGPL-3.0.txt", "licenses/7zip-License.txt",
+                "licenses/zotbridge-localgeta-NOTICE.txt",
             }.issubset(names))
             self.assertNotIn("scripts/check-pdf-download.sh", names)
             self.assertNotIn("scripts/zotbridge-shell-library.jq", names)
@@ -67,14 +68,13 @@ class TabletPackageTests(unittest.TestCase):
                                  for i in range(count)))
             self.assertEqual((package.getinfo("bin/jq").external_attr >> 16) & 0o777, 0o755)
 
-    def test_rmapi_is_the_pinned_arm64_release_binary(self):
+    def test_zotbridge_localgeta_is_an_arm64_elf_binary(self):
         with zipfile.ZipFile(PACKAGE) as package:
-            data = package.read("bin/rmapi")
-            self.assertEqual(hashlib.sha256(data).hexdigest(),
-                             "544da553a210051e5d0ade2bd24d16c30fa6fa7236215b460c6b7f6d62ec3029")
+            self.assertNotIn("bin/rmapi", package.namelist())
+            data = package.read("bin/zotbridge-localgeta")
             self.assertEqual(data[:4], b"\x7fELF")
             self.assertEqual(struct.unpack_from("<H", data, 18)[0], 183)
-            self.assertEqual((package.getinfo("bin/rmapi").external_attr >> 16) & 0o777, 0o755)
+            self.assertEqual((package.getinfo("bin/zotbridge-localgeta").external_attr >> 16) & 0o777, 0o755)
 
     def test_7zz_is_the_pinned_arm64_release_binary(self):
         with zipfile.ZipFile(PACKAGE) as package:

@@ -127,23 +127,31 @@ apply_source_tags() {
 }
 
 apply_selected_tags() {
-    local tags payload
+    local tags payload content_path="$LIBRARY/$DOCUMENT_UUID.content"
     "$JQ" -c --argjson include "$INCLUDE_ZOTERO_TAGS" --argjson unread "$ADD_UNREAD_TAG" '
       ((if $include then [.data.tags[]?.tag] else [] end)
        + (if $unread then ["unread"] else [] end)) | unique' \
       "$WORK/item.json" >"$WORK/source-tags.json"
     "$JQ" -e 'length>0' "$WORK/source-tags.json" >/dev/null || return 0
+    # reMarkable stores existing document tags in the .content file (as
+    # {name,timestamp} objects), not in .metadata.
+    [[ -f $content_path && ! -L $content_path ]] ||
+      fail tag_verification_error "The imported document content could not be read before setting its tags."
     "$JQ" -c --slurpfile source "$WORK/source-tags.json" '
-      [(.tags // [])[], $source[0][]] | unique' \
-      "$LIBRARY/$DOCUMENT_UUID.metadata" >"$WORK/remarkable-tags.json" ||
-      fail tag_verification_error "The imported document metadata could not be read before setting its tags."
+      [((.tags // [])
+        | map(if type=="object" then (.name // empty) elif type=="string" then . else empty end)
+        | map(select(length>0)))[], $source[0][]] | unique' \
+      "$content_path" >"$WORK/remarkable-tags.json" ||
+      fail tag_verification_error "The imported document content could not be read before setting its tags."
     "$JQ" -e '
       all(.[]; type=="string" and length>0
           and (contains(";") or contains(",") or test("[\u0000-\u001f\u007f]") | not))' \
       "$WORK/remarkable-tags.json" >/dev/null ||
       fail unsupported_tag "A tag cannot be represented through rm-librarian because it is empty or contains a comma, semicolon, or control character."
-    tags="$("$JQ" -c '.tags // [] | unique' "$LIBRARY/$DOCUMENT_UUID.metadata")" ||
-      fail tag_verification_error "The imported document metadata could not be read before setting its tags."
+    tags="$("$JQ" -c '(.tags // [])
+      | map(if type=="object" then (.name // empty) elif type=="string" then . else empty end)
+      | map(select(length>0)) | unique' "$content_path")" ||
+      fail tag_verification_error "The imported document content could not be read before setting its tags."
     [[ $tags != "$(<"$WORK/remarkable-tags.json")" ]] || return 0
     payload="$("$JQ" -r 'join(";")' "$WORK/remarkable-tags.json")"
     broker setTags "$DOCUMENT_UUID,$payload" optional

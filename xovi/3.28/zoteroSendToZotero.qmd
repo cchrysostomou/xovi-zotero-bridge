@@ -9,15 +9,22 @@
 ; Ships its own glyph icon (xovi/assets/zotero-send-icon.png) instead of
 ; guessing an unverified native icon-resource hash.
 
-; Add zoteroDialogVisible property and the reader toolbar button.
+; Declare zoteroDialogVisible directly on the reader root, copied verbatim
+; from touchLock.qmd's touchLocked declaration (same TRAVERSE target,
+; LOCATE BEFORE ALL, before the button insertion below). Cross-file
+; references use root.toolbar.zoteroDialogVisible, same-file references use
+; root.zoteroDialogVisible or the bare toolbar id, exactly matching how
+; touchLock.qmd reaches touchLocked from each of its own AFFECT blocks.
 ; AFFECT id reused from touchLock.qmd/penLayerMemory.qmd: it identifies the
-; reader-root target type, not this file, and must match the firmware's
-; hashtab rather than being invented.
+; reader-root target file, not this file specifically, and must match the
+; firmware's hashtab rather than being invented.
 AFFECT [[11313888899523275277]]
     TRAVERSE [[8397993708429497603]]#[[6504254477]]
         LOCATE BEFORE ALL
         INSERT {
             property ~&6503679477&~ zoteroDialogVisible: ~&214625660372&~
+            property real zoteroButtonX: 0
+            property real zoteroButtonY: 0
         }
 
         TRAVERSE [[6502786168]]#[[233745975898428]] > [[8398044571386570029]]
@@ -29,11 +36,22 @@ AFFECT [[11313888899523275277]]
                     ~&6504337259&~: ~&454089850271038938&~.~&6503187275&~.~&14888501028015932088&~
 
                     property ~&6503679477&~ _isExtensionButton: ~&6504329801&~
-                    ~&8399601734642709923&~: "file:///home/root/xovi-zotero-bridge/assets/zotero-send-icon.png"
-                    ~&233726547792244&~: !!~&7712934851008712&~ && ~&6504254477&~.~&4367731859579753176&~ > 7
-                    ~&233748328658231&~: !!~&7712934851008712&~ && ~&6504254477&~.~&4367731859579753176&~ > 7
+                    ~&233726547792244&~: ~&6504329801&~
+                    ~&233748328658231&~: !!~&7712934851008712&~ && ~&6504254477&~.~&7712989577739634&~ && ~&6504254477&~.~&4367731859579753176&~ > 7
+                    ~&8400072891534203801&~: !!~&7712934851008712&~ && ~&6504254477&~.~&4367731859579753176&~ > 7
+
+                    Image {
+                        anchors.centerIn: parent
+                        width: 32
+                        height: 32
+                        fillMode: Image.PreserveAspectFit
+                        source: "file:///home/root/xovi-zotero-bridge/assets/zotero-send-icon.png"
+                    }
 
                     ~&254542253295368380&~: {
+                        var pt = zoteroSendButton.mapToItem(null, zoteroSendButton.width, 0);
+                        ~&6504254477&~.zoteroButtonX = pt.x;
+                        ~&6504254477&~.zoteroButtonY = pt.y;
                         ~&6504254477&~.zoteroDialogVisible = ~&6504329801&~;
                     }
                 }
@@ -94,31 +112,60 @@ AFFECT [[1224665461898798997]]
     TRAVERSE [[8397993708429497603]]#[[6504254477]] > [[6502786168]]#[[15549782143769420265]]
         LOCATE BEFORE [[233704648923420]]
         INSERT {
-            Rectangle {
+            Item {
                 id: zoteroSendDialog
                 anchors.fill: parent
                 z: 9999
-                color: "white"
-                visible: ~&6504254477&~.zoteroDialogVisible
+                visible: ~&233745975898428&~.zoteroDialogVisible
 
                 property string docUuid: ""
+                property string docTitle: ""
                 property string statusText: "Send this document to Zotero."
                 property var tagsList: []
                 property var tagSelection: ({})
                 property string mode: "new"
+                property bool annotatedOnly: false
+                property bool runReverseSyncNow: false
                 property bool mapped: false
                 property string mappedTitle: ""
+                property string mappedItemKey: ""
                 property string parentKey: ""
                 property var searchResults: []
+                property var collectionsList: []
+                property string collectionKey: ""
+                property string collectionName: "No collection"
+                property bool collectionPickerOpen: false
+                property string collectionFilter: ""
+                property var filteredCollections: {
+                    if (collectionFilter === "") return collectionsList;
+                    return collectionsList.filter(function(c) {
+                        var nm = (c.name || "").toUpperCase();
+                        var first = nm.length > 0 ? nm.charAt(0) : "#";
+                        if (first < "A" || first > "Z") first = "#";
+                        return first === collectionFilter;
+                    });
+                }
                 property bool busy: false
+                property string newTagText: ""
 
-                MouseArea { anchors.fill: parent }
+                function close() {
+                    zoteroParentSearch.focus = false;
+                    zoteroNewTagInput.focus = false;
+                    Qt.inputMethod.hide();
+                    ~&233745975898428&~.zoteroDialogVisible = ~&214625660372&~;
+                }
+
+                MouseArea { anchors.fill: parent; onClicked: zoteroSendDialog.close() }
 
                 onVisibleChanged: {
                     if (visible) {
                         docUuid = !!~&7712934851008712&~ ? ~&7712934851008712&~.~&5972374&~ : "";
-                        mode = "new"; parentKey = ""; searchResults = []; tagSelection = ({});
-                        tagsList = []; mapped = false; mappedTitle = "";
+                        mode = "new"; annotatedOnly = false; runReverseSyncNow = false;
+                        parentKey = ""; searchResults = []; tagSelection = ({});
+                        tagsList = []; mapped = false; mappedTitle = ""; mappedItemKey = ""; newTagText = "";
+                        docTitle = ""; zoteroParentSearch.text = "";
+                        collectionsList = []; collectionKey = ""; collectionName = "No collection";
+                        collectionPickerOpen = false; collectionFilter = "";
                         if (docUuid.length > 0) runStatus();
                         else statusText = "No document is open.";
                     }
@@ -161,10 +208,40 @@ AFFECT [[1224665461898798997]]
                     run("tags", ["doc-tags", "--uuid", docUuid]);
                 }
 
+                function runCollections() {
+                    run("collections", ["collections", "--json"]);
+                }
+
                 function runSearch(query) {
                     if (query.length === 0) return;
                     statusText = "Searching Zotero\u2026";
                     run("search", ["list", "--query", query, "--json", "--limit", "10"]);
+                }
+
+                function chooseMode(chosen) {
+                    mode = chosen;
+                    if (chosen === "attach" && !mapped &&
+                        zoteroParentSearch.text.length === 0 && docTitle.length > 0) {
+                        zoteroParentSearch.text = docTitle;
+                    }
+                }
+
+                function toggleAnnotatedOnly() {
+                    annotatedOnly = !annotatedOnly;
+                }
+
+                function toggleRunReverseSyncNow() {
+                    runReverseSyncNow = !runReverseSyncNow;
+                }
+
+                function addTag() {
+                    var value = newTagText.trim();
+                    if (value.length === 0) return;
+                    var selection = tagSelection;
+                    if (tagsList.indexOf(value) === -1) tagsList = tagsList.concat([value]);
+                    selection[value] = true;
+                    tagSelection = Object.assign({}, selection);
+                    newTagText = "";
                 }
 
                 function submit() {
@@ -174,11 +251,13 @@ AFFECT [[1224665461898798997]]
                     }
                     var chosenTags = [];
                     for (var key in tagSelection) if (tagSelection[key]) chosenTags.push(key);
-                    var arguments = ["push-document", "--uuid", docUuid, "--mode", mode];
+                    var arguments = ["queue-for-zotero", "--uuid", docUuid, "--mode", mode];
                     if (mode === "attach") arguments = arguments.concat(["--parent-key", parentKey]);
+                    if (mode === "new" && collectionKey.length === 8) arguments = arguments.concat(["--collection", collectionKey]);
                     if (chosenTags.length > 0) arguments = arguments.concat(["--tags", chosenTags.join(",")]);
-                    statusText = "Sending to Zotero\u2026";
-                    run("push", arguments);
+                    if (annotatedOnly) arguments = arguments.concat(["--annotated-only"]);
+                    statusText = "Duplicating into the Zotero folder\u2026";
+                    run("queue", arguments);
                 }
 
                 function finishCommand() {
@@ -189,171 +268,125 @@ AFFECT [[1224665461898798997]]
                         statusText = "Bridge returned an invalid response.";
                         return;
                     }
+                    var kind = zoteroDialogCommand.pending;
+                    if (kind === "search" || kind === "collections") {
+                        if (zoteroDialogCommand.exitCode !== 0 || !Array.isArray(result)) {
+                            statusText = "Bridge error: " +
+                                ((result && result.error) || ("exit " + zoteroDialogCommand.exitCode));
+                            return;
+                        }
+                        if (kind === "search") {
+                            searchResults = result;
+                            statusText = searchResults.length + " matching Zotero items.";
+                        } else {
+                            collectionsList = result;
+                        }
+                        return;
+                    }
                     if (zoteroDialogCommand.exitCode !== 0 || result.ok !== true) {
                         statusText = "Bridge error: " + (result.error || ("exit " + zoteroDialogCommand.exitCode));
                         return;
                     }
-                    var kind = zoteroDialogCommand.pending;
                     if (kind === "status") {
                         mapped = !!result.mapped;
                         mappedTitle = result.zotero_item_title || "";
-                        mode = mapped ? "overwrite" : "new";
+                        mappedItemKey = result.zotero_item_key || "";
+                        mode = mapped ? "attach" : "new";
+                        if (mapped) parentKey = mappedItemKey;
                         runTags();
                     } else if (kind === "tags") {
                         tagsList = result.tags || [];
+                        docTitle = result.rm_title || "";
                         var selection = ({});
                         for (var i = 0; i < tagsList.length; i++) selection[tagsList[i]] = true;
                         tagSelection = selection;
                         statusText = mapped ?
                             ("Already linked to \"" + mappedTitle + "\".") :
                             "Not yet linked to Zotero. Choose how to send it.";
-                    } else if (kind === "search") {
-                        searchResults = Array.isArray(result) ? result : [];
-                        statusText = searchResults.length + " matching Zotero items.";
-                    } else if (kind === "push") {
-                        statusText = "Sent to Zotero.";
+                        if (!mapped) runCollections();
+                    } else if (kind === "queue") {
+                        statusText = "Duplicated into the Zotero folder.";
+                        if (runReverseSyncNow) {
+                            zoteroReverseSyncCommand.arguments = [
+                                "/home/root/xovi-zotero-bridge/scripts/zotbridge-run.sh", "reverse-sync"
+                            ];
+                            zoteroReverseSyncCommand.startCommand(180000);
+                        }
+                        close();
                     }
                 }
 
-                Flickable {
-                    anchors.fill: parent
-                    anchors.margins: 40
-                    contentWidth: width
-                    contentHeight: form.height
+                AsyncCommandExecutor {
+                    id: zoteroReverseSyncCommand
+                    command: "sh"
+                }
+
+                Rectangle {
+                    id: zoteroPanel
+                    width: 500
+                    property point anchorPoint: zoteroSendDialog.mapFromItem(null, ~&233745975898428&~.zoteroButtonX, ~&233745975898428&~.zoteroButtonY)
+                    property real keyboardHeight: Qt.inputMethod.visible ? Qt.inputMethod.keyboardRectangle.height : 0
+                    property real maxHeight: zoteroSendDialog.height - keyboardHeight - 24
+                    height: Math.min(680, maxHeight)
+                    x: Math.min(anchorPoint.x, zoteroSendDialog.width - width - 8)
+                    y: Math.max(8, Math.min(anchorPoint.y, zoteroSendDialog.height - keyboardHeight - height - 8))
+                    color: "white"
+                    border.width: 2
+                    border.color: "black"
+                    radius: 8
                     clip: true
-                    Column {
-                        id: form
-                        width: parent.width
-                        spacing: 16
 
-                        Text { text: "Send to Zotero"; font.pixelSize: 34; font.bold: true }
-                        Text {
-                            text: zoteroSendDialog.statusText
-                            font.pixelSize: 20; wrapMode: Text.WordWrap; width: parent.width
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: {
+                            zoteroParentSearch.focus = false;
+                            zoteroNewTagInput.focus = false;
+                            Qt.inputMethod.hide();
                         }
+                    }
 
-                        Row {
+                    Item {
+                        id: panelLayout
+                        anchors.fill: parent
+                        anchors.margins: 16
+
+                        Column {
+                            id: panelHeader
+                            width: parent.width
                             spacing: 12
-                            visible: zoteroSendDialog.mapped
-                            Repeater {
-                                model: ["overwrite", "attach"]
-                                delegate: Rectangle {
-                                    width: 240; height: 56
-                                    color: zoteroSendDialog.mode === modelData ? "black" : "white"
-                                    border.width: 2; border.color: "black"
-                                    Text {
-                                        anchors.centerIn: parent
-                                        text: modelData === "overwrite" ? "Overwrite linked PDF" : "Attach new version"
-                                        color: zoteroSendDialog.mode === modelData ? "white" : "black"
-                                        font.pixelSize: 20
-                                    }
-                                    MouseArea { anchors.fill: parent; onClicked: zoteroSendDialog.mode = modelData }
+
+                            Text {
+                                width: parent.width
+                                text: "Send to Zotero"
+                                font.pixelSize: 26; font.bold: true
+                            }
+                            Rectangle {
+                                width: parent.width; height: statusLabel.implicitHeight + 16
+                                visible: zoteroSendDialog.mapped
+                                color: "black"; radius: 4
+                                Text {
+                                    id: statusLabel
+                                    anchors.fill: parent; anchors.margins: 8
+                                    text: zoteroSendDialog.statusText
+                                    color: "white"; font.pixelSize: 16; wrapMode: Text.WordWrap
                                 }
                             }
+                            Text {
+                                visible: !zoteroSendDialog.mapped
+                                text: zoteroSendDialog.statusText
+                                font.pixelSize: 16; wrapMode: Text.WordWrap; width: parent.width
+                            }
                         }
+
                         Row {
+                            id: panelFooter
+                            anchors.bottom: parent.bottom
+                            width: parent.width
                             spacing: 12
-                            visible: !zoteroSendDialog.mapped
                             Rectangle {
-                                width: 220; height: 56
-                                color: zoteroSendDialog.mode === "new" ? "black" : "white"
-                                border.width: 2; border.color: "black"
-                                Text {
-                                    anchors.centerIn: parent; text: "Create new item"
-                                    color: zoteroSendDialog.mode === "new" ? "white" : "black"; font.pixelSize: 20
-                                }
-                                MouseArea { anchors.fill: parent; onClicked: zoteroSendDialog.mode = "new" }
-                            }
-                            Rectangle {
-                                width: 240; height: 56
-                                color: zoteroSendDialog.mode === "attach" ? "black" : "white"
-                                border.width: 2; border.color: "black"
-                                Text {
-                                    anchors.centerIn: parent; text: "Attach to existing item"
-                                    color: zoteroSendDialog.mode === "attach" ? "white" : "black"; font.pixelSize: 20
-                                }
-                                MouseArea { anchors.fill: parent; onClicked: zoteroSendDialog.mode = "attach" }
-                            }
-                        }
-
-                        Text { text: "Search parent item"; font.pixelSize: 22; visible: zoteroSendDialog.mode === "attach" }
-                        TextInput {
-                            id: zoteroParentSearch
-                            visible: zoteroSendDialog.mode === "attach"
-                            width: parent.width; font.pixelSize: 24; selectByMouse: true
-                            Keys.onReturnPressed: { zoteroSendDialog.runSearch(text); focus = false; Qt.inputMethod.hide(); }
-                            Keys.onEnterPressed: { zoteroSendDialog.runSearch(text); focus = false; Qt.inputMethod.hide(); }
-                        }
-                        Rectangle {
-                            visible: zoteroSendDialog.mode === "attach"
-                            width: parent.width; height: 220
-                            color: "white"; border.width: 2; border.color: "black"
-                            Flickable {
-                                anchors.fill: parent; anchors.margins: 8; clip: true
-                                contentWidth: width; contentHeight: parentResults.height
-                                Column {
-                                    id: parentResults; width: parent.width
-                                    Repeater {
-                                        model: zoteroSendDialog.searchResults
-                                        delegate: Rectangle {
-                                            width: parentResults.width; height: 54
-                                            color: zoteroSendDialog.parentKey === modelData.item_key ? "#dddddd" : "white"
-                                            Text {
-                                                anchors.verticalCenter: parent.verticalCenter; x: 10
-                                                width: parent.width - 20; elide: Text.ElideRight
-                                                text: modelData.title; font.pixelSize: 20
-                                            }
-                                            MouseArea {
-                                                anchors.fill: parent
-                                                onClicked: zoteroSendDialog.parentKey = modelData.item_key
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        Text { text: "Tags"; font.pixelSize: 22 }
-                        Rectangle {
-                            width: parent.width; height: 160
-                            color: "white"; border.width: 2; border.color: "black"
-                            Flickable {
-                                anchors.fill: parent; anchors.margins: 8; clip: true
-                                contentWidth: width; contentHeight: tagList.height
-                                Column {
-                                    id: tagList; width: parent.width
-                                    Repeater {
-                                        model: zoteroSendDialog.tagsList
-                                        delegate: Rectangle {
-                                            width: tagList.width; height: 48; color: "white"
-                                            Row {
-                                                anchors.verticalCenter: parent.verticalCenter; x: 10; spacing: 10
-                                                Rectangle {
-                                                    width: 28; height: 28; border.width: 2; border.color: "black"
-                                                    color: zoteroSendDialog.tagSelection[modelData] ? "black" : "white"
-                                                }
-                                                Text { text: modelData; font.pixelSize: 20 }
-                                            }
-                                            MouseArea {
-                                                anchors.fill: parent
-                                                onClicked: {
-                                                    var selection = zoteroSendDialog.tagSelection;
-                                                    selection[modelData] = !selection[modelData];
-                                                    zoteroSendDialog.tagSelection = Object.assign({}, selection);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        Row {
-                            spacing: 20
-                            Rectangle {
-                                width: 220; height: 64
+                                width: 160; height: 48
                                 color: zoteroSendDialog.busy ? "#aaaaaa" : "black"
-                                Text { anchors.centerIn: parent; text: "Send"; color: "white"; font.pixelSize: 24 }
+                                Text { anchors.centerIn: parent; text: "Duplicate"; color: "white"; font.pixelSize: 18 }
                                 MouseArea {
                                     anchors.fill: parent
                                     enabled: !zoteroSendDialog.busy
@@ -361,13 +394,343 @@ AFFECT [[1224665461898798997]]
                                 }
                             }
                             Rectangle {
-                                width: 160; height: 64
+                                width: 120; height: 48
                                 color: "white"; border.width: 2; border.color: "black"
-                                Text { anchors.centerIn: parent; text: "Close"; font.pixelSize: 24 }
-                                MouseArea {
-                                    anchors.fill: parent
-                                    onClicked: ~&6504254477&~.zoteroDialogVisible = ~&214625660372&~
+                                Text { anchors.centerIn: parent; text: "Cancel"; font.pixelSize: 18 }
+                                MouseArea { anchors.fill: parent; onClicked: zoteroSendDialog.close() }
+                            }
+                        }
+
+                        Flickable {
+                            id: panelScroll
+                            anchors.top: panelHeader.bottom
+                            anchors.topMargin: 12
+                            anchors.bottom: panelFooter.top
+                            anchors.bottomMargin: 12
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            contentWidth: width
+                            contentHeight: panelColumn.implicitHeight
+                            clip: true
+
+                            Column {
+                            id: panelColumn
+                            width: parent.width
+                            spacing: 8
+
+                                Row {
+                                    spacing: 10
+                                    Rectangle {
+                                        width: 22; height: 22; radius: 11; border.width: 2; border.color: "black"
+                                        Rectangle {
+                                            anchors.centerIn: parent; width: 12; height: 12; radius: 6
+                                            color: "black"; visible: zoteroSendDialog.mode === "new"
+                                        }
+                                        MouseArea { anchors.fill: parent; onClicked: zoteroSendDialog.chooseMode("new") }
+                                    }
+                                    Text {
+                                        text: "Create new item"; font.pixelSize: 18
+                                        MouseArea { anchors.fill: parent; onClicked: zoteroSendDialog.chooseMode("new") }
+                                    }
                                 }
+                                Row {
+                                    spacing: 10
+                                    Rectangle {
+                                        width: 22; height: 22; radius: 11; border.width: 2; border.color: "black"
+                                        Rectangle {
+                                            anchors.centerIn: parent; width: 12; height: 12; radius: 6
+                                            color: "black"; visible: zoteroSendDialog.mode === "attach"
+                                        }
+                                        MouseArea { anchors.fill: parent; onClicked: zoteroSendDialog.chooseMode("attach") }
+                                    }
+                                    Text {
+                                        text: zoteroSendDialog.mapped ?
+                                            ("Attach to \"" + zoteroSendDialog.mappedTitle + "\"") :
+                                            "Attach to existing item"
+                                        font.pixelSize: 18
+                                        MouseArea { anchors.fill: parent; onClicked: zoteroSendDialog.chooseMode("attach") }
+                                    }
+                                }
+
+                                Row {
+                                    spacing: 10
+                                    Rectangle {
+                                        width: 22; height: 22; border.width: 2; border.color: "black"
+                                        color: zoteroSendDialog.annotatedOnly ? "black" : "white"
+                                        MouseArea { anchors.fill: parent; onClicked: zoteroSendDialog.toggleAnnotatedOnly() }
+                                    }
+                                    Text {
+                                        text: "Annotations only"; font.pixelSize: 18
+                                        MouseArea { anchors.fill: parent; onClicked: zoteroSendDialog.toggleAnnotatedOnly() }
+                                    }
+                                }
+                                Row {
+                                    spacing: 10
+                                    Rectangle {
+                                        width: 22; height: 22; border.width: 2; border.color: "black"
+                                        color: zoteroSendDialog.runReverseSyncNow ? "black" : "white"
+                                        MouseArea { anchors.fill: parent; onClicked: zoteroSendDialog.toggleRunReverseSyncNow() }
+                                    }
+                                    Text {
+                                        text: "Also run reverse sync now"; font.pixelSize: 18
+                                        MouseArea { anchors.fill: parent; onClicked: zoteroSendDialog.toggleRunReverseSyncNow() }
+                                    }
+                                }
+
+                                Text {
+                                    text: "Collection (optional)"; font.pixelSize: 16
+                                    visible: zoteroSendDialog.mode === "new"
+                                }
+                                Rectangle {
+                                    width: parent.width; height: 44
+                                    visible: zoteroSendDialog.mode === "new"
+                                    color: "white"; border.width: 2; border.color: "black"
+                                    Text {
+                                        anchors.left: parent.left; anchors.leftMargin: 10
+                                        anchors.right: collectionCaret.left
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        elide: Text.ElideRight
+                                        text: zoteroSendDialog.collectionName; font.pixelSize: 16
+                                    }
+                                    Text {
+                                        id: collectionCaret
+                                        anchors.right: parent.right; anchors.rightMargin: 10
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        text: zoteroSendDialog.collectionPickerOpen ? "\u25B2" : "\u25BC"; font.pixelSize: 16
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        onClicked: zoteroSendDialog.collectionPickerOpen = !zoteroSendDialog.collectionPickerOpen
+                                    }
+                                }
+                                Rectangle {
+                                    width: parent.width; height: 220
+                                    visible: zoteroSendDialog.mode === "new" && zoteroSendDialog.collectionPickerOpen
+                                    color: "white"; border.width: 2; border.color: "black"
+                                    Column {
+                                        anchors.fill: parent; anchors.margins: 6; spacing: 6
+
+                                        Flickable {
+                                            id: alphaScroll
+                                            width: parent.width; height: 32
+                                            contentWidth: alphaRow.width; contentHeight: height
+                                            clip: true; boundsBehavior: Flickable.StopAtBounds
+                                            Row {
+                                                id: alphaRow; spacing: 4
+                                                Repeater {
+                                                    model: ["#","A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P","Q","R","S","T","U","V","W","X","Y","Z"]
+                                                    delegate: Rectangle {
+                                                        width: 26; height: 26
+                                                        color: zoteroSendDialog.collectionFilter === modelData ? "black" : "white"
+                                                        border.width: 1; border.color: "black"
+                                                        Text {
+                                                            anchors.centerIn: parent; text: modelData; font.pixelSize: 13
+                                                            color: zoteroSendDialog.collectionFilter === modelData ? "white" : "black"
+                                                        }
+                                                        MouseArea {
+                                                            anchors.fill: parent
+                                                            onClicked: {
+                                                                zoteroSendDialog.collectionFilter =
+                                                                    (zoteroSendDialog.collectionFilter === modelData) ? "" : modelData;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        Flickable {
+                                            id: collectionResultsFlick
+                                            width: parent.width; height: parent.height - 38
+                                            clip: true
+                                            contentWidth: width; contentHeight: collectionResultsColumn.height
+
+                                            Column {
+                                                id: collectionResultsColumn; width: parent.width
+                                                Rectangle {
+                                                    width: parent.width; height: 40
+                                                    visible: zoteroSendDialog.collectionFilter === ""
+                                                    color: zoteroSendDialog.collectionKey === "" ? "#dddddd" : "white"
+                                                    Text {
+                                                        anchors.verticalCenter: parent.verticalCenter; x: 8
+                                                        text: "No collection (top level)"; font.pixelSize: 15
+                                                    }
+                                                    MouseArea {
+                                                        anchors.fill: parent
+                                                        onClicked: {
+                                                            zoteroSendDialog.collectionKey = "";
+                                                            zoteroSendDialog.collectionName = "No collection";
+                                                            zoteroSendDialog.collectionPickerOpen = false;
+                                                        }
+                                                    }
+                                                }
+                                                Repeater {
+                                                    model: zoteroSendDialog.filteredCollections
+                                                    delegate: Rectangle {
+                                                        width: collectionResultsColumn.width; height: 40
+                                                        color: zoteroSendDialog.collectionKey === modelData.key ? "#dddddd" : "white"
+                                                        Text {
+                                                            anchors.verticalCenter: parent.verticalCenter; x: 8
+                                                            width: parent.width - 16; elide: Text.ElideRight
+                                                            text: modelData.name; font.pixelSize: 15
+                                                        }
+                                                        MouseArea {
+                                                            anchors.fill: parent
+                                                            onClicked: {
+                                                                zoteroSendDialog.collectionKey = modelData.key;
+                                                                zoteroSendDialog.collectionName = modelData.name;
+                                                                zoteroSendDialog.collectionPickerOpen = false;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Text {
+                                    text: "Search Zotero by title or author, then tap a result below to select the parent item."
+                                    font.pixelSize: 14; color: "#444444"; wrapMode: Text.WordWrap; width: parent.width
+                                    visible: zoteroSendDialog.mode === "attach" && !zoteroSendDialog.mapped
+                                }
+                                Row {
+                                    width: parent.width; spacing: 8
+                                    visible: zoteroSendDialog.mode === "attach" && !zoteroSendDialog.mapped
+                                    Rectangle {
+                                        width: parent.width - 96; height: 44
+                                        color: "white"; border.width: 2; border.color: "black"
+                                        Text {
+                                            anchors.fill: parent; anchors.margins: 8
+                                            text: "Title or author\u2026"; color: "#999999"; font.pixelSize: 16
+                                            visible: zoteroParentSearch.text.length === 0
+                                        }
+                                        TextInput {
+                                            id: zoteroParentSearch
+                                            anchors.fill: parent; anchors.margins: 8
+                                            font.pixelSize: 16; selectByMouse: true
+                                            Keys.onReturnPressed: { zoteroSendDialog.runSearch(text); focus = false; Qt.inputMethod.hide(); }
+                                            Keys.onEnterPressed: { zoteroSendDialog.runSearch(text); focus = false; Qt.inputMethod.hide(); }
+                                        }
+                                    }
+                                    Rectangle {
+                                        width: 88; height: 44
+                                        color: "black"
+                                        Text { anchors.centerIn: parent; text: "Search"; color: "white"; font.pixelSize: 16 }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            onClicked: {
+                                                zoteroSendDialog.runSearch(zoteroParentSearch.text);
+                                                zoteroParentSearch.focus = false;
+                                                Qt.inputMethod.hide();
+                                            }
+                                        }
+                                    }
+                                }
+                                Rectangle {
+                                    visible: zoteroSendDialog.mode === "attach" && !zoteroSendDialog.mapped
+                                    width: parent.width; height: 140
+                                    color: "white"; border.width: 2; border.color: "black"
+                                    Flickable {
+                                        anchors.fill: parent; anchors.margins: 6; clip: true
+                                        contentWidth: width; contentHeight: parentResults.height
+                                        Column {
+                                            id: parentResults; width: parent.width
+                                            Repeater {
+                                                model: zoteroSendDialog.searchResults
+                                                delegate: Rectangle {
+                                                    width: parentResults.width; height: 44
+                                                    color: zoteroSendDialog.parentKey === modelData.item_key ? "#dddddd" : "white"
+                                                    Text {
+                                                        anchors.verticalCenter: parent.verticalCenter; x: 8
+                                                        width: parent.width - 16; elide: Text.ElideRight
+                                                        text: modelData.title; font.pixelSize: 16
+                                                    }
+                                                    MouseArea {
+                                                        anchors.fill: parent
+                                                        onClicked: zoteroSendDialog.parentKey = modelData.item_key
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Text { text: "Tags to apply in Zotero (tap to include)"; font.pixelSize: 16 }
+                                Rectangle {
+                                    width: parent.width; height: 120
+                                    color: "white"; border.width: 2; border.color: "black"
+                                    Text {
+                                        anchors.centerIn: parent
+                                        visible: zoteroSendDialog.tagsList.length === 0
+                                        text: "No tags on this document yet. Add one below."
+                                        font.pixelSize: 15; color: "#666666"
+                                    }
+                                    Flickable {
+                                        anchors.fill: parent; anchors.margins: 6; clip: true
+                                        contentWidth: width; contentHeight: tagList.height
+                                        Column {
+                                            id: tagList; width: parent.width
+                                            Repeater {
+                                                model: zoteroSendDialog.tagsList
+                                                delegate: Rectangle {
+                                                    width: tagList.width; height: 40; color: "white"
+                                                    Row {
+                                                        anchors.verticalCenter: parent.verticalCenter; x: 8; spacing: 8
+                                                        Rectangle {
+                                                            width: 22; height: 22; border.width: 2; border.color: "black"
+                                                            color: zoteroSendDialog.tagSelection[modelData] ? "black" : "white"
+                                                        }
+                                                        Text { text: modelData; font.pixelSize: 16 }
+                                                    }
+                                                    MouseArea {
+                                                        anchors.fill: parent
+                                                        onClicked: {
+                                                            var selection = zoteroSendDialog.tagSelection;
+                                                            selection[modelData] = !selection[modelData];
+                                                            zoteroSendDialog.tagSelection = Object.assign({}, selection);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                Row {
+                                    width: parent.width; spacing: 8
+                                    Rectangle {
+                                        width: parent.width - 88; height: 40
+                                        color: "white"; border.width: 2; border.color: "black"
+                                        Text {
+                                            anchors.fill: parent; anchors.margins: 6
+                                            text: "New tag\u2026"; color: "#999999"; font.pixelSize: 16
+                                            visible: zoteroNewTagInput.text.length === 0
+                                        }
+                                        TextInput {
+                                            id: zoteroNewTagInput
+                                            anchors.fill: parent; anchors.margins: 6
+                                            font.pixelSize: 16; selectByMouse: true
+                                            text: zoteroSendDialog.newTagText
+                                            onTextChanged: zoteroSendDialog.newTagText = text
+                                            Keys.onReturnPressed: { zoteroSendDialog.addTag(); focus = false; Qt.inputMethod.hide(); }
+                                            Keys.onEnterPressed: { zoteroSendDialog.addTag(); focus = false; Qt.inputMethod.hide(); }
+                                        }
+                                    }
+                                    Rectangle {
+                                        width: 80; height: 40
+                                        color: "white"; border.width: 2; border.color: "black"
+                                        Text { anchors.centerIn: parent; text: "Add tag"; font.pixelSize: 14 }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            onClicked: {
+                                                zoteroSendDialog.addTag();
+                                                zoteroNewTagInput.focus = false;
+                                                Qt.inputMethod.hide();
+                                            }
+                                        }
+                                    }
+                                }
+
                             }
                         }
                     }

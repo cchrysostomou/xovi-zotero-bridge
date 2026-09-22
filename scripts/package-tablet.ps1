@@ -17,29 +17,6 @@ if ((Get-FileHash -LiteralPath $jq -Algorithm SHA256).Hash.ToLowerInvariant() -n
     throw "Downloaded jq checksum does not match the pinned official release. Remove dist\downloads\jq-linux-arm64 and retry."
 }
 
-$rmapiVersion = "v0.0.35"
-$rmapiArchiveHash = "645c170d8119b4dcb652cf79612e362fcb032dc0e5869ff520eec1324da39637"
-$rmapiBinaryHash = "544da553a210051e5d0ade2bd24d16c30fa6fa7236215b460c6b7f6d62ec3029"
-$rmapiArchive = Join-Path $downloads "rmapi-linux-arm64-$rmapiVersion.tar.gz"
-$rmapiDirectory = Join-Path $downloads "rmapi-$rmapiVersion-arm64"
-$rmapi = Join-Path $rmapiDirectory "rmapi"
-if (-not (Test-Path -LiteralPath $rmapiArchive)) {
-    Invoke-WebRequest -UseBasicParsing `
-        "https://github.com/ddvk/rmapi/releases/download/$rmapiVersion/rmapi-linux-arm64.tar.gz" `
-        -OutFile $rmapiArchive
-}
-if ((Get-FileHash -LiteralPath $rmapiArchive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $rmapiArchiveHash) {
-    throw "Downloaded rmapi archive checksum does not match the pinned official release."
-}
-if (-not (Test-Path -LiteralPath $rmapi)) {
-    New-Item -ItemType Directory -Force -Path $rmapiDirectory | Out-Null
-    & tar -xzf $rmapiArchive -C $rmapiDirectory
-    if ($LASTEXITCODE -ne 0) { throw "Could not extract the pinned rmapi archive." }
-}
-if ((Get-FileHash -LiteralPath $rmapi -Algorithm SHA256).Hash.ToLowerInvariant() -ne $rmapiBinaryHash) {
-    throw "Extracted rmapi binary checksum does not match the pinned release."
-}
-
 $sevenZipVersion = "26.03"
 $sevenZipArchiveHash = "2389ba20e4d8295e8709c20b6263b69bd1ec4972fe38a04ad7a1badbf595b996"
 $sevenZipBinaryHash = "9a26e7d54bfdae8a8f1750cdb70697547b738c2334aa89f3d3f2c8645c8443fe"
@@ -63,16 +40,32 @@ if ((Get-FileHash -LiteralPath $sevenZip -Algorithm SHA256).Hash.ToLowerInvarian
     throw "Extracted 7zz binary checksum does not match the pinned release."
 }
 
+& (Join-Path $PSScriptRoot "build-zotbridge-localgeta.ps1")
+if ($LASTEXITCODE -ne 0) { throw "Building zotbridge-localgeta failed." }
+$localGeta = Join-Path $downloads "zotbridge-localgeta"
+
 $licenses = @{
     "jq-COPYING" = "https://raw.githubusercontent.com/jqlang/jq/$version/COPYING"
     "oniguruma-COPYING" = "https://raw.githubusercontent.com/kkos/oniguruma/4ef89209a239c1aea328cf13c05a2807e5c146d1/COPYING"
     "musl-COPYRIGHT" = "https://git.musl-libc.org/cgit/musl/plain/COPYRIGHT?h=v1.2.5"
-    "rmapi-AGPL-3.0.txt" = "https://raw.githubusercontent.com/ddvk/rmapi/$rmapiVersion/LICENSE"
     "7zip-License.txt" = "https://raw.githubusercontent.com/ip7z/7zip/$sevenZipVersion/DOC/License.txt"
 }
 foreach ($name in $licenses.Keys) {
     Invoke-WebRequest -UseBasicParsing $licenses[$name] -OutFile (Join-Path $downloads $name)
 }
+$rmapiForkLicense = Join-Path $root "tools\rmapi-fork\LICENSE"
+if (-not (Test-Path -LiteralPath $rmapiForkLicense)) {
+    throw "Missing tools\rmapi-fork\LICENSE required for AGPL-3.0 redistribution."
+}
+$zotbridgeLocalGetaNotice = Join-Path $downloads "zotbridge-localgeta-NOTICE.txt"
+$noticeText = @(
+    "bin/zotbridge-localgeta is built from tools/rmapi-fork, a trimmed fork of"
+    "github.com/ddvk/rmapi retaining its archive/annotations annotation-merge"
+    "logic. It is a derivative work and is licensed under the same GNU AGPL-3.0"
+    "terms as upstream rmapi (see rmapi-AGPL-3.0.txt in this same directory)."
+    "See tools/rmapi-fork/README.md in the repository for what was changed."
+) -join "`n"
+[System.IO.File]::WriteAllText($zotbridgeLocalGetaNotice, $noticeText, (New-Object System.Text.UTF8Encoding($false)))
 if ($DependenciesOnly) {
     Write-Output "Verified $version ARM64 binary and downloaded redistribution notices."
     exit 0
@@ -96,8 +89,8 @@ try {
         @{ Path = (Join-Path $root "README.md"); Name = "README.md"; Binary = $false }
         @{ Path = (Join-Path $root "config.example.toml"); Name = "config.example.toml"; Binary = $false }
         @{ Path = $jq; Name = "bin/jq"; Binary = $true }
-        @{ Path = $rmapi; Name = "bin/rmapi"; Binary = $true }
         @{ Path = $sevenZip; Name = "bin/7zz"; Binary = $true }
+        @{ Path = $localGeta; Name = "bin/zotbridge-localgeta"; Binary = $true }
         @{ Path = (Join-Path $root "xovi\assets\zotero-send-icon.png"); Name = "assets/zotero-send-icon.png"; Binary = $true }
     )
     foreach ($file in $runtimeFiles) {
@@ -106,10 +99,12 @@ try {
     foreach ($name in $licenses.Keys) {
         $files += @{ Path = (Join-Path $downloads $name); Name = "licenses/" + $name; Binary = $false }
     }
+    $files += @{ Path = $rmapiForkLicense; Name = "licenses/rmapi-AGPL-3.0.txt"; Binary = $false }
+    $files += @{ Path = $zotbridgeLocalGetaNotice; Name = "licenses/zotbridge-localgeta-NOTICE.txt"; Binary = $false }
     foreach ($file in $files) {
         $entry = $zip.CreateEntry($file.Name, [System.IO.Compression.CompressionLevel]::Optimal)
         $mode = 33188 # Regular file, 0644.
-        if ($file.Name -in @("bin/jq", "bin/rmapi", "bin/7zz") -or $file.Name.EndsWith(".sh")) { $mode = 33261 } # 0755.
+        if ($file.Name -in @("bin/jq", "bin/7zz", "bin/zotbridge-localgeta") -or $file.Name.EndsWith(".sh")) { $mode = 33261 } # 0755.
         $entry.ExternalAttributes = $mode -shl 16
         $destination = $entry.Open()
         try {
@@ -130,4 +125,4 @@ try {
 }
 Write-Output "Created $output"
 Write-Output "Tags reuse the JSON cache until --refresh; existing config and state are not packaged."
-Write-Output "Contains Zotero commands plus verified ARM64 jq and rmapi; excludes credentials, cloud tokens, state, private probes and Python."
+Write-Output "Contains Zotero commands plus verified ARM64 jq, 7zz, and zotbridge-localgeta; excludes credentials, cloud tokens, state, private probes and Python."
