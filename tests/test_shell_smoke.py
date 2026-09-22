@@ -1368,11 +1368,15 @@ class ShellSmokeTests(unittest.TestCase):
     def test_send_to_zotero_skips_markup_variants_without_uploading_when_no_annotations(self):
         uuid = "cc4c1d9d-a04a-4f6e-bb08-d6f54cde88b8"
         self.setup_pdf_library_document(uuid)
-        self.configure_broker()
+        # zotbridge-localgeta itself now decides whether a document has any
+        # markup: -k means "annotated pages only", and it exits 3 when none
+        # qualify. There is no broker call in this path anymore.
         local_geta = self.bin / "zotbridge-localgeta"
         local_geta.write_text(
             "#!/bin/sh\n"
-            'for arg do case "$prev" in -output) out=$arg;; esac; prev=$arg; done\n'
+            'k=; for arg do case "$prev" in -output) out=$arg;; esac\n'
+            '  case "$arg" in -k) k=1;; esac; prev=$arg; done\n'
+            '[ -n "$k" ] && exit 3\n'
             'printf "%%PDF-1.7\\nExported\\n" >"$out"\n'
         )
         local_geta.chmod(0o755)
@@ -1381,8 +1385,7 @@ class ShellSmokeTests(unittest.TestCase):
         seven_zip.write_text("#!/bin/sh\nexit 1\n")
         seven_zip.chmod(0o755)
         self.env["ZOTBRIDGE_7ZZ"] = str(seven_zip)
-        with self.broker_reply([b""]):
-            result = self.run_cli("send-to-zotero", "--uuid", uuid, "--mode", "new", "--send-merged")
+        result = self.run_cli("send-to-zotero", "--uuid", uuid, "--mode", "new", "--send-merged")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         data = json.loads(result.stdout)
         self.assertTrue(data["ok"])

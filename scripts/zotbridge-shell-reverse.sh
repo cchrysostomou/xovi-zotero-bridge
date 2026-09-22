@@ -118,27 +118,19 @@ export_reverse_pdf() {
     export_pdf_from_path "$uuid"
 }
 
-# Trims $REVERSE_PDF down to only the pages carrying stylus annotations, using
-# the rm-librarian/rm-pdfium broker signals (same mechanism as
-# xovi-qmd-extensions' duplicateAnnotatedPages.qmd). Replaces $REVERSE_PDF
-# with the trimmed copy on success. Returns 1 (no silent fallback) if
-# rm-pdfium is unavailable, the broker calls fail, or no annotated pages are
+# Trims $REVERSE_PDF down to only the pages carrying stylus annotations,
+# using zotbridge-localgeta's -k flag (skip pages without real annotation
+# content, even for PDF-backed documents) directly against the on-device
+# .rm files. Replaces $REVERSE_PDF with the trimmed copy on success. Returns
+# 1 (no silent fallback) if the export fails or no annotated pages are
 # found, so reverse_item can report a clear error instead of uploading the
 # full document.
 trim_annotated_pdf() {
-    local uuid=$1 content_path="$LIBRARY/$uuid.content" page_range dst
-    [[ -f $content_path ]] || return 1
-    broker getContentPages "$uuid" text || return 1
-    printf '%s' "$BROKER_REPLY" >"$WORK/trim-ids.txt"
-    "$JQ" -R -s '[splits("\n")] | map(select(length > 0))' "$WORK/trim-ids.txt" >"$WORK/trim-ids.json"
-    "$JQ" -e -r --slurpfile content "$content_path" -f "$ROOT_DIR/scripts/zotbridge-shell-trim-pages.jq" \
-      "$WORK/trim-ids.json" >"$WORK/trim-range.txt" 2>/dev/null || return 1
-    page_range="$(<"$WORK/trim-range.txt")"
-    [[ -n $page_range ]] || return 1
-    dst="$WORK/export/annotated.pdf"
+    local uuid=$1 dst="$WORK/export/annotated.pdf" rc
     rm -f -- "$dst"
-    broker trimPdf "$REVERSE_PDF,$dst,$page_range" text || return 1
-    [[ $BROKER_REPLY == ok ]] || return 1
+    "$LOCALGETA" -library "$LIBRARY" -uuid "$uuid" -output "$dst" -k >/dev/null 2>&1
+    rc=$?
+    ((rc == 0)) || return 1
     pdf_valid "$dst" || return 1
     REVERSE_PDF=$dst
 }
@@ -149,7 +141,7 @@ trim_annotated_pdf() {
 # duplicate's own .content.extraMetadata so a later reverse_sync run can act
 # on this exact request without any other state being passed back in. Sets
 # DUP_UUID/DUP_NAME on success. Only PDF-backed documents are supported (the
-# only format rm-pdfium/trimPdf and this feature's export path handle).
+# only format this feature's export path handles).
 duplicate_document() {
     local src_uuid=$1 mode=$2 collection=${3:-} tags_csv=${4:-} annotated_only=$5
     local src_meta src_content src_pdf file_type now new_uuid
@@ -439,45 +431,34 @@ prepare_send_file() {
     REVERSE_PDF=$pdf_path
 }
 
-# Exports the full merged (all pages, annotations baked in) PDF for $uuid and
-# determines whether it actually has any annotated pages, using the same
-# rm-pdfium/broker signals as trim_annotated_pdf. Unlike trim_annotated_pdf,
-# this keeps the untrimmed export available (SEND_MERGED_PDF) instead of
-# replacing it, since send_to_zotero may need to upload the untrimmed export,
-# a trimmed-to-annotated-pages copy (built separately by
-# build_send_annotated_pdf), or both from the same underlying export.
-# Returns 1 only when the export itself fails; a document with zero
-# annotated pages is not an error (SEND_HAS_MARKUP is simply left false).
+# Exports the full merged (all pages, annotations baked in) PDF for $uuid,
+# and separately asks zotbridge-localgeta to build an annotated-pages-only
+# PDF directly (its -k flag skips every page without real annotation
+# content, even for PDF-backed documents). Both exports run entirely
+# locally against the on-device .rm files; no broker/rm-librarian call is
+# involved, since rm-librarian has no PDF-trimming signal to build on.
+# Sets SEND_MERGED_PDF always (on success) and SEND_ANNOTATED_PDF only when
+# the document actually has annotated pages (SEND_HAS_MARKUP=true).
+# Returns 1 only for a genuine export failure; a document with no
+# annotations at all is not an error (SEND_HAS_MARKUP is simply left false).
 compute_send_markup() {
-    local uuid=$1 content_path="$LIBRARY/$uuid.content" page_range
+    local uuid=$1 annotated_output="$WORK/export/annotated-only.pdf" rc
     SEND_HAS_MARKUP=false
     SEND_MERGED_PDF=
-    SEND_ANNOT_PAGE_RANGE=
+    SEND_ANNOTATED_PDF=
     export_pdf_from_path "$uuid" || return 1
     SEND_MERGED_PDF=$REVERSE_PDF
-    [[ -f $content_path ]] || return 0
-    broker getContentPages "$uuid" text || return 0
-    printf '%s' "$BROKER_REPLY" >"$WORK/send-annot-ids.txt"
-    "$JQ" -R -s '[splits("\n")] | map(select(length > 0))' "$WORK/send-annot-ids.txt" >"$WORK/send-annot-ids.json"
-    "$JQ" -e -r --slurpfile content "$content_path" -f "$ROOT_DIR/scripts/zotbridge-shell-trim-pages.jq" \
-      "$WORK/send-annot-ids.json" >"$WORK/send-annot-range.txt" 2>/dev/null || return 0
-    page_range="$(<"$WORK/send-annot-range.txt")"
-    [[ -n $page_range ]] || return 0
-    SEND_HAS_MARKUP=true
-    SEND_ANNOT_PAGE_RANGE=$page_range
-}
-
-# Trims compute_send_markup's SEND_MERGED_PDF down to only the annotated
-# pages, using the page range it already computed. Sets SEND_ANNOTATED_PDF
-# on success. Must only be called after compute_send_markup reports
-# SEND_HAS_MARKUP=true.
-build_send_annotated_pdf() {
-    local dst="$WORK/export/annotated-only.pdf"
-    rm -f -- "$dst"
-    broker trimPdf "$SEND_MERGED_PDF,$dst,$SEND_ANNOT_PAGE_RANGE" text || return 1
-    [[ $BROKER_REPLY == ok ]] || return 1
-    pdf_valid "$dst" || return 1
-    SEND_ANNOTATED_PDF=$dst
+    rm -f -- "$annotated_output"
+    "$LOCALGETA" -library "$LIBRARY" -uuid "$uuid" -output "$annotated_output" -k >/dev/null 2>"$WORK/localgeta-annotated.err"
+    rc=$?
+    if ((rc == 0)) && pdf_valid "$annotated_output"; then
+        SEND_HAS_MARKUP=true
+        SEND_ANNOTATED_PDF=$annotated_output
+    elif ((rc == 3)); then
+        SEND_HAS_MARKUP=false
+    else
+        return 1
+    fi
 }
 
 # Updates an already-mapped Zotero item's tags to include any newly selected
@@ -522,6 +503,15 @@ send_to_zotero() {
         fail configuration_error "Sending to Zotero requires WebDAV storage for a personal Zotero library."
     [[ -x ${SEVEN_ZIP:-} ]] ||
         fail missing_dependency "Sending to Zotero requires the bundled 7zz binary."
+    # record_reverse_mapping only reloads state from disk (under its own
+    # lock) once its cheap pre-check against $WORK/state.json says the
+    # mapping doesn't already exist there. Unlike reverse_item (whose
+    # resolve_reverse_parent always calls load_state first), send_to_zotero
+    # has no earlier step that populates $WORK/state.json, so that pre-check
+    # must be primed here or it silently no-ops (jq erroring on the missing
+    # file looks the same as "already mapped") and the mapping never gets
+    # recorded even though the upload itself succeeds.
+    load_state
     local meta="$LIBRARY/$uuid.metadata" content="$LIBRARY/$uuid.content" pdf="$LIBRARY/$uuid.pdf"
     [[ -f $meta && -f $content && -f $pdf ]] ||
         fail FileNotFoundError "No reMarkable document found with that UUID."
@@ -574,8 +564,7 @@ send_to_zotero() {
     if [[ $send_annotated_only == true ]]; then
         variants+=(annotated_only); suffixes+=(".rm.annot.pdf")
         if [[ $markup_failed == true ]]; then files+=("__FAILED__")
-        elif [[ $has_markup == true ]] && build_send_annotated_pdf; then files+=("$SEND_ANNOTATED_PDF")
-        elif [[ $has_markup == true ]]; then files+=("__FAILED__")
+        elif [[ $has_markup == true ]]; then files+=("$SEND_ANNOTATED_PDF")
         else files+=("__SKIPPED__")
         fi
     fi

@@ -38,7 +38,17 @@ type PdfGeneratorOptions struct {
 	AddPageNumbers  bool
 	AllPages        bool
 	AnnotationsOnly bool //export the annotations without the background/pdf
+	// SkipUnannotated, when true, drops every page without real annotation
+	// content from the output, even for PDF-backed documents (which
+	// otherwise always keep every page regardless of AllPages). Used to
+	// produce a genuinely trimmed "annotated pages only" export.
+	SkipUnannotated bool
 }
+
+// ErrNoAnnotatedPages is returned by Generate when SkipUnannotated is set
+// and the document has no pages with actual annotation content, so callers
+// can distinguish "nothing to export" from a real generation failure.
+var ErrNoAnnotatedPages = errors.New("document has no annotated pages")
 
 func CreatePdfGenerator(zipName, outputFilePath string, options PdfGeneratorOptions) *PdfGenerator {
 	return &PdfGenerator{zipName: zipName, outputFilePath: outputFilePath, options: options}
@@ -100,13 +110,25 @@ func (p *PdfGenerator) Generate() error {
 		c.SetOutlineTree(outlines)
 	}
 
+	annotatedPageCount := 0
 	for _, pageAnnotations := range zip.Pages {
 		hasContent := pageAnnotations.Data != nil
+		hasAnnotations := hasContent && pageHasAnnotations(pageAnnotations.Data)
+		if hasAnnotations {
+			annotatedPageCount++
+		}
 
-		// For PDFs, always include all pages so the full document is
-		// preserved with annotations overlaid. For notebooks (no source
-		// PDF), skip blank pages unless -a is given.
-		if !hasContent && !p.options.AllPages && p.pdfReader == nil {
+		if p.options.SkipUnannotated {
+			// Genuinely drop every page without real annotation content
+			// (not just blank .rm files), even for PDF-backed documents,
+			// so the output only ever contains annotated pages.
+			if !hasAnnotations {
+				continue
+			}
+		} else if !hasContent && !p.options.AllPages && p.pdfReader == nil {
+			// For PDFs, always include all pages so the full document is
+			// preserved with annotations overlaid. For notebooks (no source
+			// PDF), skip blank pages unless -a is given.
 			continue
 		}
 		//1 based, redirected page
@@ -251,7 +273,37 @@ func (p *PdfGenerator) Generate() error {
 		page.SetContentStreams(wrapper, core.NewFlateEncoder())
 	}
 
+	if p.options.SkipUnannotated && annotatedPageCount == 0 {
+		return ErrNoAnnotatedPages
+	}
+
 	return c.WriteToFile(p.outputFilePath)
+}
+
+// pageHasAnnotations reports whether a page's parsed .rm data contains any
+// actual drawn content: a non-eraser stroke with at least one point, or a
+// highlight. An .rm file can exist for a page (hasContent==true in the
+// generator loop above) while every stroke on it has been fully erased;
+// this distinguishes that case so annotated-only exports don't include
+// visually blank pages.
+func pageHasAnnotations(data *rm.Rm) bool {
+	if data == nil {
+		return false
+	}
+	if len(data.Highlights) > 0 {
+		return true
+	}
+	for _, layer := range data.Layers {
+		for _, line := range layer.Lines {
+			if line.BrushType == rm.Eraser {
+				continue
+			}
+			if len(line.Points) > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (p *PdfGenerator) initBackgroundPages(pdfArr []byte) error {

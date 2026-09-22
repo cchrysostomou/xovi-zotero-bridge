@@ -9,6 +9,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -25,6 +26,7 @@ func main() {
 		allPages        bool
 		annotationsOnly bool
 		pageNumbers     bool
+		onlyAnnotated   bool
 	)
 
 	flag.StringVar(&library, "library", "", "path to the xochitl data directory containing <uuid>.content etc. (required)")
@@ -33,10 +35,11 @@ func main() {
 	flag.BoolVar(&allPages, "a", false, "include all pages, not just annotated ones")
 	flag.BoolVar(&annotationsOnly, "n", false, "export annotations only, without the PDF background")
 	flag.BoolVar(&pageNumbers, "p", false, "add page numbers")
+	flag.BoolVar(&onlyAnnotated, "k", false, "keep only pages with actual annotation content, even for PDF-backed documents")
 	flag.Parse()
 
 	if library == "" || docUUID == "" || output == "" {
-		fmt.Fprintln(os.Stderr, "usage: zotbridge-localgeta -library <xochitl-dir> -uuid <uuid> -output <file.pdf> [-a] [-n] [-p]")
+		fmt.Fprintln(os.Stderr, "usage: zotbridge-localgeta -library <xochitl-dir> -uuid <uuid> -output <file.pdf> [-a] [-n] [-p] [-k]")
 		os.Exit(2)
 	}
 
@@ -50,9 +53,16 @@ func main() {
 		AddPageNumbers:  pageNumbers,
 		AllPages:        allPages,
 		AnnotationsOnly: annotationsOnly,
+		SkipUnannotated: onlyAnnotated,
 	}
 	generator := annotations.CreatePdfGeneratorFromZip(z, output, options)
 	if err := generator.Generate(); err != nil {
+		if errors.Is(err, annotations.ErrNoAnnotatedPages) {
+			// Distinct exit code so callers can tell "no markup on this
+			// document" apart from a real generation failure.
+			fmt.Fprintln(os.Stderr, "no annotated pages")
+			os.Exit(3)
+		}
 		fmt.Fprintf(os.Stderr, "error: failed to generate annotated pdf: %s\n", err)
 		os.Exit(1)
 	}
