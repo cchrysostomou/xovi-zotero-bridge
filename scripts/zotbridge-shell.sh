@@ -25,6 +25,7 @@ ACTIVITY_READY=false
 ACTIVITY_LOGGED=false
 LOCALGETA=
 SEVEN_ZIP=
+STATE_LOADED=false
 
 activity_event() {
     local event=$1 error=${2:-} tag=${3:-} count=${4:-} item=${5:-${ITEM_KEY:-}}
@@ -283,10 +284,29 @@ done
 "$JQ" -Rse -f "$ROOT_DIR/scripts/zotbridge-shell-config.jq" "$CONFIG" >"$WORK/config.json" ||
     fail configuration_error "Invalid configuration. Shell backend supports flat keys with JSON-compatible quoted strings, numbers and booleans; no tables, literal/multiline strings or duplicate keys. Check required values and limits."
 get_config() { "$JQ" -r ".$1" "$WORK/config.json"; }
-[[ $TARGET_GIVEN == true ]] || TARGET="$(get_config default_target_folder)"
-[[ $LIMIT_GIVEN == true ]] || LIMIT="$(get_config list_page_limit)"
-[[ $QUEUE_TAG_SET == true ]] || QUEUE_TAG="$(get_config sync_queue_tag)"
-[[ $SYNCED_TAG_SET == true ]] || SYNCED_TAG="$(get_config sync_synced_tag)"
+# jq recompiles its program text on every invocation, which costs several times
+# more than reading one value, so every startup setting is emitted as a quoted
+# shell assignment in a single pass instead of one jq call per key. Every key
+# below is given a non-null default by zotbridge-shell-config.jq.
+"$JQ" -r '
+  {CFG_TARGET:.default_target_folder, CFG_LIMIT:.list_page_limit,
+   CFG_QUEUE_TAG:.sync_queue_tag, CFG_SYNCED_TAG:.sync_synced_tag,
+   CFG_STATE:.state_json_path, CFG_SQLITE_STATE:.state_db_path,
+   CFG_MB_IN:.mb_in_path, CFG_MB_OUT:.mb_out_path, CFG_LIBRARY:.xochitl_dir,
+   CFG_USE_WEBDAV:.use_webdav, CFG_LIBRARY_TYPE:.library_type,
+   CFG_LIBRARY_ID:.library_id, CFG_BROKER_TIMEOUT:.broker_timeout_s,
+   CFG_ZOTERO_TIMEOUT:.zotero_timeout_s, CFG_WEBDAV_TIMEOUT:.webdav_timeout_s,
+   CFG_ZOTERO_MAX_MB:.zotero_max_download_mb, CFG_WEBDAV_MAX_MB:.webdav_max_download_mb}
+  | to_entries
+  | if all(.[]; .value != null) then . else error("missing configuration value") end
+  | .[] | "\(.key)=\(.value|tostring|@sh)"' "$WORK/config.json" >"$WORK/config.env" ||
+    fail configuration_error "Invalid configuration. Shell backend supports flat keys with JSON-compatible quoted strings, numbers and booleans; no tables, literal/multiline strings or duplicate keys. Check required values and limits."
+# shellcheck disable=SC1091
+source "$WORK/config.env"
+[[ $TARGET_GIVEN == true ]] || TARGET=$CFG_TARGET
+[[ $LIMIT_GIVEN == true ]] || LIMIT=$CFG_LIMIT
+[[ $QUEUE_TAG_SET == true ]] || QUEUE_TAG=$CFG_QUEUE_TAG
+[[ $SYNCED_TAG_SET == true ]] || SYNCED_TAG=$CFG_SYNCED_TAG
 absolute_path() {
     case "$1" in
         "~/"*) REPLY="$HOME/${1:2}" ;;
@@ -294,8 +314,8 @@ absolute_path() {
         *) REPLY="$CONFIG_DIR/$1" ;;
     esac
 }
-absolute_path "$(get_config state_json_path)"; STATE=$REPLY
-absolute_path "$(get_config state_db_path)"; SQLITE_STATE=$REPLY
+absolute_path "$CFG_STATE"; STATE=$REPLY
+absolute_path "$CFG_SQLITE_STATE"; SQLITE_STATE=$REPLY
 [[ $STATE != "$SQLITE_STATE" ]] || fail configuration_error "state_json_path must differ from state_db_path; SQLite files are never migrated or overwritten."
 ACTIVITY_LOG="$STATE.activity.jsonl"
 [[ ! -L $ACTIVITY_LOG ]] || fail activity_log_error "Activity log must not be a symbolic link."
@@ -317,30 +337,36 @@ if [[ -n ${ZOTBRIDGE_7ZZ:-} ]]; then
 elif [[ -x $ROOT_DIR/bin/7zz ]]; then
     SEVEN_ZIP="$ROOT_DIR/bin/7zz"
 fi
-absolute_path "$(get_config mb_in_path)"; MB_IN=$REPLY
-absolute_path "$(get_config mb_out_path)"; MB_OUT=$REPLY
-absolute_path "$(get_config xochitl_dir)"; LIBRARY=$REPLY
-USE_WEBDAV="$(get_config use_webdav)"
-LIBRARY_TYPE="$(get_config library_type)"
-LIBRARY_ID="$(get_config library_id)"
+absolute_path "$CFG_MB_IN"; MB_IN=$REPLY
+absolute_path "$CFG_MB_OUT"; MB_OUT=$REPLY
+absolute_path "$CFG_LIBRARY"; LIBRARY=$REPLY
+USE_WEBDAV=$CFG_USE_WEBDAV
+LIBRARY_TYPE=$CFG_LIBRARY_TYPE
+LIBRARY_ID=$CFG_LIBRARY_ID
 API="https://api.zotero.org/${LIBRARY_TYPE}s/$LIBRARY_ID"
 LIBRARY_SCOPE="$LIBRARY_TYPE:$LIBRARY_ID"
-BROKER_TIMEOUT="$(get_config broker_timeout_s)"
-ZOTERO_TIMEOUT="$(get_config zotero_timeout_s)"
-WEBDAV_TIMEOUT="$(get_config webdav_timeout_s)"
-MAX_BYTES=$(($(get_config zotero_max_download_mb) * 1024 * 1024))
-[[ $USE_WEBDAV != true ]] || MAX_BYTES=$(($(get_config webdav_max_download_mb) * 1024 * 1024))
+BROKER_TIMEOUT=$CFG_BROKER_TIMEOUT
+ZOTERO_TIMEOUT=$CFG_ZOTERO_TIMEOUT
+WEBDAV_TIMEOUT=$CFG_WEBDAV_TIMEOUT
+MAX_BYTES=$((CFG_ZOTERO_MAX_MB * 1024 * 1024))
+[[ $USE_WEBDAV != true ]] || MAX_BYTES=$((CFG_WEBDAV_MAX_MB * 1024 * 1024))
 
 lock_state() {
     mkdir -p -- "$(dirname -- "$STATE")"
     exec {json_lock}>>"$STATE.lock"
     flock -n "$json_lock" || fail busy "Another operation is using this JSON state; try later."
+    # Any snapshot read before the lock may predate another writer's commit.
+    STATE_LOADED=false
 }
 load_state() {
+    # Validating and normalising in one jq pass halves the per-load cost, and the
+    # snapshot is reused for the rest of the run. lock_state clears STATE_LOADED
+    # so the first load after taking the lock always re-reads from disk.
+    [[ $STATE_LOADED != true ]] || return 0
     [[ ! -L $STATE ]] || fail state_error "JSON state must not be a symbolic link."
     if [[ -e $STATE ]]; then
         [[ -f $STATE ]] || fail state_error "JSON state must be a regular file."
-        "$JQ" -se '
+        "$JQ" -s '
           def cache_valid:
             type=="object" and all(.[];
               type=="object" and all(.[];
@@ -353,15 +379,17 @@ load_state() {
               and (.fetched_at | type=="number" and .>=0 and floor==.)
               and (.collections | type=="array" and all(.[];
                 type=="object" and (.key|type=="string") and (.name|type=="string"))));
-          length==1 and (.[0] | type=="object" and .version==1
+          if length==1 and (.[0] | type=="object" and .version==1
             and (.mappings|type=="object") and (.attempts|type=="object")
             and (if has("tag_cache") then (.tag_cache|cache_valid) else true end)
-            and (if has("collection_cache") then (.collection_cache|collection_cache_valid) else true end))' "$STATE" >/dev/null ||
+            and (if has("collection_cache") then (.collection_cache|collection_cache_valid) else true end))
+          then .[0] | (.tag_cache //= {} | .collection_cache //= {})
+          else error("invalid json state") end' "$STATE" >"$WORK/state.json" ||
             fail state_error "Invalid JSON state. Existing SQLite state is separate and is not automatically migrated."
-        "$JQ" '.tag_cache //= {} | .collection_cache //= {}' "$STATE" >"$WORK/state.json"
     else
         printf '%s\n' '{"version":1,"mappings":{},"attempts":{},"tag_cache":{},"collection_cache":{}}' >"$WORK/state.json"
     fi
+    STATE_LOADED=true
 }
 save_state() {
     # Staging in the destination directory keeps rename atomic across filesystems.
@@ -582,7 +610,7 @@ total_results() {
 }
 
 list_zotero_library() {
-    local encoded_query paper key has_pdf tag_parameter= encoded_tags total count next_skip base_path
+    local encoded_query tag_parameter= encoded_tags total count next_skip base_path
     load_state
     encoded_query="$(printf '%s' "$QUERY" | "$JQ" -Rrs '@uri')"
     if ((${#TAGS[@]})); then
@@ -613,19 +641,27 @@ list_zotero_library() {
         next_skip=$((SKIP + count))
     fi
     : >"$WORK/papers.jsonl"
-    while IFS= read -r paper; do
-        printf '%s\n' "$paper" >"$WORK/paper.json"
-        key="$("$JQ" -r '.key' "$WORK/paper.json")"
-        [[ $key =~ ^[A-Z0-9]{8}$ ]] || fail zotero_error "Zotero returned an invalid item key."
-        find_mapping "$key"
-        num_children="$("$JQ" '.numChildren' "$WORK/paper.json")"
-        has_pdf="$("$JQ" '.numChildren > 0' "$WORK/paper.json")"
-        "$JQ" -c --argjson pdf "$has_pdf" --argjson children "$num_children" --arg scope "$LIBRARY_SCOPE" --arg key "$key" \
-          --slurpfile mapping "$WORK/mapping.json" --slurpfile state "$WORK/state.json" '
-          {item_key:.key,title:((.title // "")|gsub("^\\s+|\\s+$";"")),
-           year:((.date // "")|tostring|gsub("^\\s+|\\s+$";"")),has_pdf:$pdf,num_children:$children,
-           mapping:$mapping[0],attempt:($state[0].attempts[$scope][$key] // null)}' "$WORK/paper.json" >>"$WORK/papers.jsonl"
-    done <"$WORK/items.jsonl"
+    # One jq pass over the whole page: the previous per-item loop ran four jq
+    # invocations per result, and each invocation recompiles the program and
+    # reparses the state snapshot. Key validation stays a separate pass so an
+    # invalid key is still reported as a Zotero error rather than a state error.
+    "$JQ" -se 'all(.[]; type=="object"
+      and (.key|type=="string" and test("^[A-Z0-9]{8}$"))
+      and (.numChildren|type=="number"))' "$WORK/items.jsonl" >/dev/null ||
+      fail zotero_error "Zotero returned an invalid item key."
+    "$JQ" -L "$ROOT_DIR/scripts" -c --arg type "$LIBRARY_TYPE" --arg library "$LIBRARY_ID" \
+      --arg scope "$LIBRARY_SCOPE" --slurpfile state "$WORK/state.json" '
+      include "zotbridge-shell-mapping";
+      ($state[0]) as $st | . as $item | $item.key as $key
+      | {item_key:$key,
+         title:(($item.title // "")|gsub("^\\s+|\\s+$";"")),
+         year:(($item.date // "")|tostring|gsub("^\\s+|\\s+$";"")),
+         has_pdf:($item.numChildren > 0),
+         num_children:$item.numChildren,
+         mapping:($st | mapping_for_item($type; $library; $key)),
+         attempt:($st.attempts[$scope][$key] // null)}' \
+      "$WORK/items.jsonl" >"$WORK/papers.jsonl" ||
+      fail state_error "Cannot look up the import: conflicting or legacy mapping data requires explicit migration."
     if [[ $PAGE_INFO == true ]]; then
         "$JQ" -s --argjson skip "$SKIP" --argjson limit "$LIMIT" --argjson total "$total" \
           --argjson next "$next_skip" '{ok:true,items:.,pagination:{

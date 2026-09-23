@@ -278,9 +278,12 @@ sync_tagged() {
     activity_event found "" "$QUEUE_TAG" "$found"
     : >"$WORK/results.jsonl"
     : >"$WORK/remaining.jsonl"
+    # Decode every queued key in one pass rather than spawning a jq per item.
+    # snapshot_sync_queue has already proven each key matches ^[A-Z0-9]{8}$, so
+    # re-encoding a key as a JSON string below needs no further escaping.
+    "$JQ" -r '.' "$WORK/queue.jsonl" >"$WORK/queue-keys.txt"
     while IFS= read -r key; do
-        if [[ $stop == true ]]; then printf '%s\n' "$key" >>"$WORK/remaining.jsonl"; continue; fi
-        key="$(printf '%s' "$key" | "$JQ" -r '.')"
+        if [[ $stop == true ]]; then printf '"%s"\n' "$key" >>"$WORK/remaining.jsonl"; continue; fi
         ZOTBRIDGE_ACTIVITY_CHILD=true ZOTBRIDGE_ACTIVITY_PARENT_ACTION="$COMMAND" \
           bash "$ROOT_DIR/scripts/zotbridge-shell.sh" sync-item --item-key "$key" \
           --tag "$QUEUE_TAG" --synced-tag "$SYNCED_TAG" --target-folder "$TARGET" \
@@ -291,17 +294,21 @@ sync_tagged() {
         wait "$WORKER" || result=$?
         WORKER=
         WORKER_IS_COMMAND=false
-        "$JQ" -se --argjson status "$result" 'length==1 and (.[0] |
-          type=="object" and (.ok|type=="boolean") and .ok==($status==0))' "$WORK/one-result.json" >/dev/null ||
+        # Validate and annotate the worker result in a single jq invocation.
+        "$JQ" -sc --argjson status "$result" --arg key "$key" '
+          if length==1 and (.[0] |
+            type=="object" and (.ok|type=="boolean") and .ok==($status==0))
+          then .[0] + {item_key:$key}
+          else error("invalid worker result") end' \
+          "$WORK/one-result.json" >>"$WORK/results.jsonl" ||
           fail runtime_error "The sync worker returned an invalid result. Check item status before retrying."
-        "$JQ" -c --arg key "$key" '.+{item_key:$key}' "$WORK/one-result.json" >>"$WORK/results.jsonl"
         # Abort on shared infrastructure failures; item-specific failures can continue.
         if ((result != 0)) && "$JQ" -e '.error |
           IN("unsupported_item","unsupported_tag","archive_error","download_error",
              "no_pdf","source_changed","write_conflict","verification_error") | not' \
           "$WORK/one-result.json" >/dev/null; then stop=true; fi
         [[ ! -e $MB_IN.zotbridge-pending ]] || stop=true
-    done <"$WORK/queue.jsonl"
+    done <"$WORK/queue-keys.txt"
     "$JQ" -s --slurpfile remaining "$WORK/remaining.jsonl" '
       {ok:(all(.[]; .ok) and ($remaining|length)==0),
        total:(length+($remaining|length)),processed:length,
