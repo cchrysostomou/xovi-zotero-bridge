@@ -54,6 +54,7 @@ parameters = parse_qs(urlsplit(url).query)
 start = int(parameters.get("start", ["0"])[0])
 limit = int(parameters.get("limit", ["100"])[0])
 data = {"key":"ITEM1234","data":{"key":"ITEM1234","itemType":"journalArticle","title":"Test Paper","date":"2024",
+    "dateAdded":"2024-01-02T03:04:05Z","dateModified":"2024-05-06T07:08:09Z",
     "tags":[{"tag":"important"}]}}
 attachment = {"key":"HOSTED12","data":{"key":"HOSTED12","itemType":"attachment",
     "parentItem":"ITEM1234","contentType":"application/pdf","linkMode":"imported_file","filename":"Paper.pdf"}}
@@ -386,13 +387,6 @@ class ShellSmokeTests(unittest.TestCase):
         self.assertFalse(json.loads(result.stdout)[0]["has_pdf"])
         self.assertEqual(json.loads(result.stdout)[0]["num_children"], 0)
 
-    def list_titles(self, *arguments):
-        """Run a --page-info listing and return (pagination, [titles])."""
-        result = self.run_cli("list", "--page-info", *arguments)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        payload = json.loads(result.stdout)
-        return payload["pagination"], [item["title"] for item in payload["items"]]
-
     def test_sort_and_direction_are_forwarded_to_zotero(self):
         result = self.run_cli("list", "--limit", "5", "--json", "--sort", "title",
                               "--direction", "asc")
@@ -412,52 +406,12 @@ class ShellSmokeTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1, result.stdout)
             self.assertEqual(json.loads(result.stdout)["error"], "ValueError")
 
-    def test_starts_with_filters_titles_across_every_page(self):
-        self.env["FAKE_ITEM_TOTAL"] = "5"
-        self.env["FAKE_ITEM_TITLES"] = json.dumps(
-            ["Alpha study", "  beta paper", "Gamma ray", "3D printing", "Zeta"])
-        pagination, titles = self.list_titles("--starts-with", "a")
-        # Lowercase "a" still matches "Alpha study", and the match is found even
-        # though a paged listing's first page would not have returned it alone.
-        self.assertEqual(titles, ["Alpha study"])
-        self.assertEqual(pagination["total"], 1)
-        self.assertFalse(pagination["has_more"])
-        # Leading whitespace is ignored when deciding the first letter.
-        _, titles = self.list_titles("--starts-with", "B")
-        self.assertEqual(titles, ["beta paper"])
-
-    def test_starts_with_hash_selects_titles_that_do_not_start_with_a_letter(self):
-        self.env["FAKE_ITEM_TOTAL"] = "4"
-        self.env["FAKE_ITEM_TITLES"] = json.dumps(["Alpha", "3D printing", "Beta", "!bang"])
-        _, titles = self.list_titles("--starts-with", "#")
-        self.assertEqual(titles, ["3D printing", "!bang"])
-
-    def test_starts_with_paginates_over_the_filtered_total(self):
-        self.env["FAKE_ITEM_TOTAL"] = "6"
-        self.env["FAKE_ITEM_TITLES"] = json.dumps(
-            ["Aa", "Zz", "Ab", "Yy", "Ac", "Xx"])
-        first, titles = self.list_titles("--starts-with", "A", "--limit", "2")
-        self.assertEqual(titles, ["Aa", "Ab"])
-        # The reported total is the filtered count, not the library total.
-        self.assertEqual(first["total"], 3)
-        self.assertTrue(first["has_more"])
-        self.assertEqual(first["next_skip"], 2)
-        second, titles = self.list_titles("--starts-with", "A", "--limit", "2",
-                                          "--skip", str(first["next_skip"]))
-        self.assertEqual(titles, ["Ac"])
-        self.assertFalse(second["has_more"])
-
-    def test_starts_with_scans_full_pages_rather_than_the_requested_limit(self):
-        self.env["FAKE_ITEM_TOTAL"] = "3"
-        self.env["FAKE_ITEM_TITLES"] = json.dumps(["Aa", "Ab", "Ac"])
-        self.list_titles("--starts-with", "A", "--limit", "1")
-        queries = [json.loads(line)["query"] for line in self.requests.read_text().splitlines()]
-        self.assertTrue(any("limit=100" in query for query in queries))
-
-    def test_starts_with_rejects_multi_character_values(self):
-        result = self.run_cli("list", "--starts-with", "ab")
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertEqual(json.loads(result.stdout)["error"], "ValueError")
+    def test_listing_reports_the_zotero_timestamps_used_for_local_sorting(self):
+        result = self.run_cli("list", "--limit", "5", "--json")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        first = json.loads(result.stdout)[0]
+        self.assertEqual(first["date_added"], "2024-01-02T03:04:05Z")
+        self.assertEqual(first["date_modified"], "2024-05-06T07:08:09Z")
 
     def test_listing_reports_the_creator_summary(self):
         self.env["FAKE_ITEM_CREATORS"] = json.dumps(["Darwin"])

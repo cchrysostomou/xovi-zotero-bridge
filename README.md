@@ -156,17 +156,6 @@ displayed pages.
 passed through to Zotero, which sorts before paginating. Sorting defaults to
 `dateModified` descending.
 
-`--starts-with A-Z|#` keeps only the items whose title begins with that
-character, case-insensitively and ignoring leading whitespace; `#` selects
-titles that do not begin with a letter. Zotero has no server-side prefix filter
-and its `q` search matches substrings anywhere rather than anchoring to the
-start, so this filter cannot be pushed to the API. Instead the backend pages
-through the **entire** already-filtered result set 100 items at a time, filters
-locally, and then applies `--skip`/`--limit` to the filtered list, so
-`pagination.total` reports the filtered count. Combine it with `--query`,
-`--tag` or `--collection` to keep the scan small; a scan that would exceed 3000
-items fails rather than issuing an unbounded number of requests.
-
 Existing `list --json` callers still receive an array. For a UI, use `--page-info`,
 which implies JSON and returns:
 
@@ -179,6 +168,8 @@ which implies JSON and returns:
       "title": "Example paper",
       "year": "2024",
       "creator": "Darwin",
+      "date_added": "2024-01-02T03:04:05Z",
+      "date_modified": "2024-05-06T07:08:09Z",
       "has_pdf": true,
       "mapping": null,
       "attempt": null
@@ -195,9 +186,10 @@ which implies JSON and returns:
 ```
 
 The total is the filtered bibliographic result count from Zotero's `Total-Results`
-header, except under `--starts-with`, where it is the locally filtered count.
-`creator` is Zotero's `creatorSummary` and is an empty string when the item has
-no creators. Preserve the query/tags/limit and pass `next_skip` to retrieve the next
+header. `creator` is Zotero's `creatorSummary` and is an empty string when the item has
+no creators. `date_added` and `date_modified` are Zotero's raw ISO-8601 timestamps,
+exposed so a client that has cached a complete result set can re-sort it locally
+instead of re-querying. Preserve the query/tags/limit and pass `next_skip` to retrieve the next
 page. On the last page, `has_more` is false and `next_skip` is null. An offset
 past the end returns an empty page. Reset the offset when filters change.
 Offset pagination is not a snapshot: library edits between requests can shift

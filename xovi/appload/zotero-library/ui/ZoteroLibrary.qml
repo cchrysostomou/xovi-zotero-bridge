@@ -25,7 +25,6 @@ Rectangle {
     property bool collectionsVisible: false
     property bool hideOnRemarkable: false
     property string tagAlphaFilter: "All"
-    property string itemAlphaFilter: "All"
     property string sortField: "dateModified"
     property string sortDirection: "desc"
     property int activeIndex: -1
@@ -44,6 +43,31 @@ Rectangle {
     property string currentSignature: ""
     property string pendingCacheKey: ""
     property int pageCacheLimit: 1000
+
+    // Whole-result-set cache. A background walk pages through every item
+    // matching the current query/tags/collection on a second command channel,
+    // so it never sets `busy` and never blocks the UI. The walk is keyed on
+    // the *result set* only (sort and page size are deliberately excluded),
+    // so once it completes, changing the sort or the page re-slices this list
+    // locally instead of re-querying Zotero.
+    property string datasetKey: ""
+    property var datasetItems: []
+    property var datasetSeen: ({})
+    property int datasetTotal: 0
+    property bool datasetComplete: false
+    property bool datasetFailed: false
+    property int prefetchSkip: 0
+    property bool prefetchBusy: false
+    // Zotero's latency is erratic (measured 2.8s-32s for identical requests,
+    // against a 60s backend timeout), so an occasional failed page is expected
+    // rather than fatal; only a repeatedly failing offset abandons the walk.
+    property int prefetchRetries: 0
+    property int prefetchMaxRetries: 3
+    // The walk uses full 100-item pages rather than the UI's page size: a
+    // 650-item library is ~7 requests instead of ~80, which matters because
+    // each round trip to Zotero has been measured at 0.6-11s.
+    property int prefetchPageSize: 100
+    property string prefetchNote: ""
 
     // Per-item state for the tap-to-fetch/expand attachment list: keyed by
     // item_key -> {fetching, children (null until fetched), expanded}.
@@ -156,13 +180,166 @@ Rectangle {
         var sortedTags = selectedTags.slice().sort();
         return JSON.stringify({q: searchInput.text, tags: sortedTags,
             collection: selectedCollection, limit: pagination.limit,
-            alpha: itemAlphaFilter, sort: sortField, direction: sortDirection});
+            sort: sortField, direction: sortDirection});
     }
 
     function clearPageCache() {
         pageCache = {};
         pageCacheOrder = [];
         pageCacheItemCount = 0;
+    }
+
+    // Identity of the result set itself. Sort and page size are excluded on
+    // purpose: they only change how an already-fetched set is presented.
+    function datasetSignature() {
+        var sortedTags = selectedTags.slice().sort();
+        return JSON.stringify({q: searchInput.text, tags: sortedTags,
+            collection: selectedCollection});
+    }
+
+    function resetDataset() {
+        datasetKey = datasetSignature();
+        datasetItems = [];
+        datasetSeen = {};
+        datasetTotal = 0;
+        datasetComplete = false;
+        datasetFailed = false;
+        prefetchSkip = 0;
+        prefetchRetries = 0;
+        prefetchNote = "";
+    }
+
+    function prefetchArguments(skip) {
+        // Pinned to a fixed sort so that changing the UI sort mid-walk cannot
+        // reshuffle the server-side paging underneath us and make the walk
+        // skip or repeat items. The collected set is order-independent.
+        var args = ["list", "--page-info", "--limit", String(prefetchPageSize),
+                    "--skip", String(skip), "--query", searchInput.text,
+                    "--sort", "dateAdded", "--direction", "desc"];
+        for (var i = 0; i < selectedTags.length; i++) {
+            args.push("--tag");
+            args.push(selectedTags[i]);
+        }
+        if (selectedCollection.length > 0) {
+            args.push("--collection");
+            args.push(selectedCollection);
+        }
+        return args;
+    }
+
+    function prefetchTick() {
+        if (!bootstrapped || datasetComplete || datasetFailed) return;
+        // Yield to anything the user asked for; the timer retries later.
+        if (busy || prefetchBusy) return;
+        if (datasetSignature() !== datasetKey) return;
+        prefetchBusy = true;
+        prefetchCommand.output = "";
+        prefetchCommand.errorOutput = "";
+        prefetchCommand.arguments = [
+            "/home/root/xovi-zotero-bridge/scripts/zotbridge-run.sh"
+        ].concat(prefetchArguments(prefetchSkip));
+        if (!prefetchCommand.startCommand(120000)) {
+            prefetchBusy = false;
+            prefetchFailedAttempt("could not start");
+        }
+    }
+
+    function prefetchFailedAttempt(reason) {
+        prefetchRetries += 1;
+        appendLog("✕ [prefetch] skip=" + prefetchSkip + " " + reason +
+                   " (attempt " + prefetchRetries + "/" + prefetchMaxRetries + ")");
+        if (prefetchRetries >= prefetchMaxRetries) {
+            datasetFailed = true;
+            prefetchNote = "";
+        }
+    }
+
+    function finishPrefetch() {
+        prefetchBusy = false;
+        var result;
+        try {
+            result = JSON.parse(prefetchCommand.output);
+        } catch (error) {
+            result = null;
+        }
+        // A background walk must never hijack the status line or surface an
+        // error dialog: retry quietly, and on repeated failure just leave
+        // paging on the normal server-backed path.
+        if (!result || prefetchCommand.exitCode !== 0 || result.ok !== true) {
+            prefetchFailedAttempt((result && result.error) || "exit " + prefetchCommand.exitCode);
+            return;
+        }
+        if (datasetSignature() !== datasetKey) return;
+        prefetchRetries = 0;
+        var fetched = result.items || [];
+        var merged = datasetItems.slice();
+        for (var i = 0; i < fetched.length; i++) {
+            var key = fetched[i].item_key;
+            if (!key || datasetSeen[key]) continue;
+            datasetSeen[key] = true;
+            merged.push(fetched[i]);
+        }
+        datasetItems = merged;
+        var info = result.pagination || {};
+        if (info.total !== undefined) datasetTotal = info.total;
+        var next = info.next_skip;
+        if (next === null || next === undefined || fetched.length === 0) {
+            datasetComplete = true;
+            prefetchNote = "";
+            appendLog("✓ [prefetch] cached all " + datasetItems.length + " papers");
+        } else {
+            prefetchSkip = next;
+            prefetchNote = "Caching " + datasetItems.length + "/" + datasetTotal + "…";
+        }
+    }
+
+    // Mirrors Zotero's sort fields closely enough for re-slicing a cached set.
+    // Zotero's own collation (which ignores leading articles) is not
+    // reproduced, so a locally sorted page can differ slightly from a
+    // server-sorted one for titles like "The ...".
+    function compareItems(a, b, field) {
+        var left, right;
+        if (field === "title") {
+            left = (a.title || "").toLowerCase();
+            right = (b.title || "").toLowerCase();
+        } else if (field === "creator") {
+            left = (a.creator || "").toLowerCase();
+            right = (b.creator || "").toLowerCase();
+        } else if (field === "dateAdded") {
+            left = a.date_added || "";
+            right = b.date_added || "";
+        } else {
+            left = a.date_modified || "";
+            right = b.date_modified || "";
+        }
+        if (left < right) return -1;
+        if (left > right) return 1;
+        // Deterministic tiebreak, otherwise equal keys could reshuffle between
+        // pages and an item could appear twice or not at all.
+        if (a.item_key < b.item_key) return -1;
+        if (a.item_key > b.item_key) return 1;
+        return 0;
+    }
+
+    function sortedDataset() {
+        var field = sortField;
+        var sign = (sortDirection === "desc") ? -1 : 1;
+        return datasetItems.slice().sort(function(a, b) {
+            return sign * compareItems(a, b, field);
+        });
+    }
+
+    function serveFromDataset(skip) {
+        var sorted = sortedDataset();
+        var limit = pagination.limit;
+        var start = Math.max(0, Math.min(skip, Math.max(0, sorted.length - 1)));
+        if (sorted.length === 0) start = 0;
+        var hasMore = (start + limit) < sorted.length;
+        items = sorted.slice(start, start + limit);
+        pagination = {skip: start, limit: limit, total: sorted.length,
+                      has_more: hasMore, next_skip: hasMore ? start + limit : null};
+        lastSkip = start;
+        status = "Showing " + items.length + " of " + pagination.total + " papers (cached)";
     }
 
     function cachePage(key, pageItems, pageInfo) {
@@ -182,15 +359,6 @@ Rectangle {
         }
     }
 
-    function commandTimeout(action) {
-        if (action === "import") return 60000;
-        // A letter filter has to page through the whole matching result set
-        // because Zotero cannot filter by first letter, so it can take far
-        // longer than an ordinary single-page listing.
-        if (action === "list" && itemAlphaFilter !== "All") return 180000;
-        return 30000;
-    }
-
     function run(arguments, action) {
         if (busy) return;
         busy = true;
@@ -201,7 +369,7 @@ Rectangle {
             "/home/root/xovi-zotero-bridge/scripts/zotbridge-run.sh"
         ].concat(arguments);
         appendLog("→ " + arguments.join(" "));
-        if (!bridgeCommand.startCommand(commandTimeout(action))) {
+        if (!bridgeCommand.startCommand(action === "import" ? 60000 : 30000)) {
             busy = false;
             status = "Could not start bridge command";
             appendLog("✕ could not start bridge command");
@@ -227,10 +395,6 @@ Rectangle {
         var args = ["list", "--page-info", "--limit", String(pagination.limit),
                     "--skip", String(skip), "--query", searchInput.text,
                     "--sort", sortField, "--direction", sortDirection];
-        if (itemAlphaFilter !== "All") {
-            args.push("--starts-with");
-            args.push(itemAlphaFilter);
-        }
         for (var i = 0; i < selectedTags.length; i++) {
             args.push("--tag");
             args.push(selectedTags[i]);
@@ -245,6 +409,13 @@ Rectangle {
     function loadPage(skip, forceRefresh) {
         lastQuery = searchInput.text;
         lastSkip = skip;
+        if (forceRefresh || datasetSignature() !== datasetKey) resetDataset();
+        // Once the whole result set is cached, paging and re-sorting are pure
+        // local work: no Zotero request at all.
+        if (datasetComplete) {
+            serveFromDataset(skip);
+            return;
+        }
         var signature = querySignature();
         if (signature !== currentSignature) {
             clearPageCache();
@@ -259,9 +430,7 @@ Rectangle {
             return;
         }
         pendingCacheKey = key;
-        status = (itemAlphaFilter === "All")
-            ? "Loading Zotero papers…"
-            : "Scanning library for titles starting with " + itemAlphaFilter + "… this can take a while";
+        status = "Loading Zotero papers…";
         items = [];
         run(listArguments(skip), "list");
     }
@@ -390,13 +559,6 @@ Rectangle {
         };
         walk("", 0, "");
         return out;
-    }
-
-    function setItemAlphaFilter(letter) {
-        if (itemAlphaFilter === letter) return;
-        itemAlphaFilter = letter;
-        activeIndex = -1;
-        loadPage(0);
     }
 
     function setSortField(field) {
@@ -558,11 +720,14 @@ Rectangle {
     }
 
     function markItemImported(itemKey, rmPath) {
-        var updated = items.map(function(item) {
+        var patch = function(item) {
             if (item.item_key !== itemKey) return item;
             return Object.assign({}, item, {mapping: {rm_path: rmPath}, attempt: false});
-        });
-        items = updated;
+        };
+        items = items.map(patch);
+        // The cached set backs every later page render, so it has to learn
+        // about the import too or the badge would vanish on the next page turn.
+        if (datasetItems.length > 0) datasetItems = datasetItems.map(patch);
     }
 
     function clearPendingChildrenFetch() {
@@ -595,6 +760,27 @@ Rectangle {
         }
     }
 
+    // Separate channel so the background walk never touches `busy` and can
+    // therefore never disable the UI or swallow a user action.
+    AsyncCommandExecutor {
+        id: prefetchCommand
+        command: "sh"
+        property string output: ""
+        property string errorOutput: ""
+        onStdOutAvailable: function(chunk) { output += chunk; }
+        onStdErrAvailable: function(chunk) { errorOutput += chunk; }
+        onRunningChanged: {
+            if (!running && app.prefetchBusy) app.finishPrefetch();
+        }
+    }
+
+    Timer {
+        interval: 500
+        repeat: true
+        running: app.bootstrapped && !app.datasetComplete && !app.datasetFailed
+        onTriggered: app.prefetchTick()
+    }
+
     Component.onCompleted: loadSettings()
 
     Column {
@@ -622,7 +808,7 @@ Rectangle {
 
         Text {
             width: parent.width
-            text: app.status
+            text: app.status + (app.prefetchNote ? "   " + app.prefetchNote : "")
             font.pixelSize: 22
             wrapMode: Text.WordWrap
         }
@@ -663,45 +849,40 @@ Rectangle {
 
         Row {
             width: parent.width
-            spacing: 14
-            Flickable {
-                width: parent.width - 304
-                height: 60
-                clip: true
-                contentWidth: itemAlphaFilters.width
-                contentHeight: height
-                interactive: contentWidth > width
-                Row {
-                    id: itemAlphaFilters
-                    spacing: 8
-                    Repeater {
-                        model: ["All", "#", "A", "B", "C", "D", "E", "F", "G",
-                                "H", "I", "J", "K", "L", "M", "N", "O", "P",
-                                "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"]
-                        delegate: Rectangle {
-                            width: modelData === "All" ? 66 : 44
-                            height: 52
-                            color: app.itemAlphaFilter === modelData ? "black" : "white"
-                            border.width: 2
-                            border.color: "black"
-                            Text {
-                                anchors.centerIn: parent
-                                text: modelData
-                                color: app.itemAlphaFilter === modelData ? "white" : "black"
-                                font.pixelSize: 20
-                            }
-                            MouseArea {
-                                anchors.fill: parent
-                                enabled: !app.busy
-                                onClicked: app.setItemAlphaFilter(modelData)
-                            }
-                        }
+            spacing: 10
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Sort"
+                font.pixelSize: 20
+            }
+            Repeater {
+                model: [{label: "Recent", field: "dateModified"},
+                        {label: "Name", field: "title"},
+                        {label: "Date added", field: "dateAdded"},
+                        {label: "Creator", field: "creator"}]
+                delegate: Rectangle {
+                    width: 160
+                    height: 52
+                    color: app.sortField === modelData.field ? "black" : "white"
+                    border.width: 2
+                    border.color: "black"
+                    Text {
+                        anchors.centerIn: parent
+                        text: modelData.label + (app.sortField === modelData.field
+                              ? (app.sortDirection === "asc" ? "  ▲" : "  ▼") : "")
+                        color: app.sortField === modelData.field ? "white" : "black"
+                        font.pixelSize: 19
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        enabled: !app.busy
+                        onClicked: app.setSortField(modelData.field)
                     }
                 }
             }
             Item {
-                width: 290
-                height: 60
+                width: 250
+                height: 52
                 Row {
                     id: notOnRmFilter
                     anchors.verticalCenter: parent.verticalCenter
@@ -732,41 +913,6 @@ Rectangle {
                     onClicked: {
                         app.hideOnRemarkable = !app.hideOnRemarkable;
                         app.activeIndex = -1;
-                    }
-                }
-            }
-        }
-
-        Row {
-            width: parent.width
-            spacing: 10
-            Text {
-                anchors.verticalCenter: parent.verticalCenter
-                text: "Sort"
-                font.pixelSize: 20
-            }
-            Repeater {
-                model: [{label: "Recent", field: "dateModified"},
-                        {label: "Name", field: "title"},
-                        {label: "Date added", field: "dateAdded"},
-                        {label: "Creator", field: "creator"}]
-                delegate: Rectangle {
-                    width: 180
-                    height: 52
-                    color: app.sortField === modelData.field ? "black" : "white"
-                    border.width: 2
-                    border.color: "black"
-                    Text {
-                        anchors.centerIn: parent
-                        text: modelData.label + (app.sortField === modelData.field
-                              ? (app.sortDirection === "asc" ? "  ▲" : "  ▼") : "")
-                        color: app.sortField === modelData.field ? "white" : "black"
-                        font.pixelSize: 19
-                    }
-                    MouseArea {
-                        anchors.fill: parent
-                        enabled: !app.busy
-                        onClicked: app.setSortField(modelData.field)
                     }
                 }
             }

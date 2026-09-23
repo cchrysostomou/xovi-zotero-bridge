@@ -123,7 +123,7 @@ fi
 
 if [[ ${1:-} == --help || ${1:-} == -h || $# == 0 ]]; then
     printf '%s\n' 'Usage: zotbridge-run.sh list [--query TEXT] [--tag NAME ...] [--collection KEY] [--limit 1..100] [--skip N] [--json] [--page-info]' \
-      '                        [--sort title|creator|dateAdded|dateModified] [--direction asc|desc] [--starts-with A-Z|#]' \
+      '                        [--sort title|creator|dateAdded|dateModified] [--direction asc|desc]' \
       '       zotbridge-run.sh tags [--query TEXT] [--json] [--refresh]' \
       '       zotbridge-run.sh collections [--json] [--refresh]' \
       '       zotbridge-run.sh clear-mappings' \
@@ -154,12 +154,6 @@ REFRESH=false
 COLLECTION=
 SORT=dateModified
 DIRECTION=desc
-STARTS_WITH=
-# Zotero cannot filter by leading character, so --starts-with is resolved by
-# scanning every page of the already-filtered result set. The cap keeps a
-# broad scan of a huge library from turning into hundreds of requests, and
-# stays below the time the caller is willing to wait for one listing.
-SCAN_MAX_ITEMS=3000
 QUEUE_TAG=
 SYNCED_TAG=
 QUEUE_TAG_SET=false
@@ -189,7 +183,6 @@ while (($#)); do
         --collection|-c) [[ $COMMAND =~ ^(list|queue-for-zotero|send-to-zotero)$ && $# -ge 2 ]] || fail ValueError "Invalid --collection option."; COLLECTION=$2; shift 2 ;;
         --sort) [[ $COMMAND == list && $# -ge 2 ]] || fail ValueError "Invalid --sort option."; SORT=$2; shift 2 ;;
         --direction) [[ $COMMAND == list && $# -ge 2 ]] || fail ValueError "Invalid --direction option."; DIRECTION=$2; shift 2 ;;
-        --starts-with) [[ $COMMAND == list && $# -ge 2 ]] || fail ValueError "Invalid --starts-with option."; STARTS_WITH=$2; shift 2 ;;
         --synced-tag) [[ $COMMAND =~ ^sync-(tagged|item)$ && $# -ge 2 ]] || fail ValueError "Invalid --synced-tag option."; SYNCED_TAG=$2; SYNCED_TAG_SET=true; shift 2 ;;
         --page-info) [[ $COMMAND == list ]] || fail ValueError "Invalid --page-info option."; PAGE_INFO=true; shift ;;
         --json) [[ $COMMAND =~ ^(list|tags|collections|settings|children)$ ]] || fail ValueError "Invalid --json option."; AS_JSON=true; shift ;;
@@ -242,10 +235,6 @@ fi
 [[ $SORT =~ ^(title|creator|dateAdded|dateModified)$ ]] ||
     fail ValueError "sort must be title, creator, dateAdded or dateModified."
 [[ $DIRECTION =~ ^(asc|desc)$ ]] || fail ValueError "direction must be asc or desc."
-# '#' selects titles that do not begin with a letter.
-[[ -z $STARTS_WITH ]] || [[ $STARTS_WITH =~ ^([A-Za-z]|#)$ ]] ||
-    fail ValueError "starts-with must be a single letter or '#'."
-[[ $STARTS_WITH == '#' ]] || STARTS_WITH=${STARTS_WITH^^}
 if [[ $COMMAND =~ ^(doc-status|doc-tags|queue-for-zotero|send-to-zotero)$ ]]; then
     [[ $UUID_OPT =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]] ||
         fail ValueError "uuid must be a canonical reMarkable document UUID."
@@ -630,7 +619,6 @@ total_results() {
 
 list_zotero_library() {
     local encoded_query tag_parameter= encoded_tags total count next_skip base_path
-    local query_suffix scan_start scan_count
     load_state
     encoded_query="$(printf '%s' "$QUERY" | "$JQ" -Rrs '@uri')"
     if ((${#TAGS[@]})); then
@@ -646,43 +634,16 @@ list_zotero_library() {
     base_path="items/top"
     [[ -z $COLLECTION ]] || base_path="collections/$COLLECTION/items/top"
     # Zotero permits one itemType parameter; leading '-' negates the OR group.
-    query_suffix="q=$encoded_query&itemType=-attachment%20%7C%7C%20note%20%7C%7C%20annotation&sort=$SORT&direction=$DIRECTION$tag_parameter"
-    if [[ -n $STARTS_WITH ]]; then
-        # Zotero has no leading-character filter and no anchored search, so the
-        # whole (already narrowed) result set is fetched and sliced locally.
-        # Pages arrive pre-sorted, so filtering preserves the requested order.
-        : >"$WORK/scan.jsonl"
-        scan_start=0
-        while :; do
-            metadata "$base_path?limit=100&start=$scan_start&$query_suffix" "$WORK/scan-page.json"
-            "$JQ" -e 'type=="array"' "$WORK/scan-page.json" >/dev/null || fail zotero_error "Invalid item list."
-            total_results
-            ((TOTAL_RESULTS <= SCAN_MAX_ITEMS)) ||
-              fail zotero_error "Too many items to filter by first letter; narrow the results with a search term, tag or collection first."
-            scan_count="$("$JQ" 'length' "$WORK/scan-page.json")"
-            ((scan_count > 0)) || break
-            "$JQ" -c '.[]' "$WORK/scan-page.json" >>"$WORK/scan.jsonl"
-            scan_start=$((scan_start + scan_count))
-            ((scan_start < TOTAL_RESULTS)) || break
-        done
-        "$JQ" -s --arg letter "$STARTS_WITH" --argjson skip "$SKIP" --argjson limit "$LIMIT" '
-          [ .[] | select(((.data.title // "") | sub("^\\s+";"") | .[0:1] | ascii_upcase) as $first
-            | if $letter == "#" then ($first | test("^[A-Z]$")) | not else $first == $letter end) ]
-          | {total: length, page: .[$skip:($skip + $limit)]}' "$WORK/scan.jsonl" >"$WORK/scan-filtered.json" ||
-          fail zotero_error "Invalid item list."
-        total="$("$JQ" '.total' "$WORK/scan-filtered.json")"
-        "$JQ" '.page' "$WORK/scan-filtered.json" >"$WORK/items.json"
-        count="$("$JQ" 'length' "$WORK/items.json")"
-    else
-        metadata "$base_path?limit=$LIMIT&start=$SKIP&$query_suffix" "$WORK/items.json"
-        "$JQ" -e 'type=="array"' "$WORK/items.json" >/dev/null || fail zotero_error "Invalid item list."
-        total_results
-        total=$TOTAL_RESULTS
-        count="$("$JQ" 'length' "$WORK/items.json")"
-        ((count <= LIMIT)) || fail zotero_error "Zotero returned an oversized page."
-    fi
+    metadata "$base_path?limit=$LIMIT&start=$SKIP&q=$encoded_query&itemType=-attachment%20%7C%7C%20note%20%7C%7C%20annotation&sort=$SORT&direction=$DIRECTION$tag_parameter" "$WORK/items.json"
+    "$JQ" -e 'type=="array"' "$WORK/items.json" >/dev/null || fail zotero_error "Invalid item list."
+    total_results
+    total=$TOTAL_RESULTS
+    count="$("$JQ" 'length' "$WORK/items.json")"
+    ((count <= LIMIT)) || fail zotero_error "Zotero returned an oversized page."
     "$JQ" -c '.[]|select(.data.itemType!="attachment" and .data.itemType!="note" and .data.itemType!="annotation")
-      |{key:.data.key,title:.data.title,date:.data.date,creator:(.meta.creatorSummary // ""),numChildren:(.meta.numChildren // 0)}' \
+      |{key:.data.key,title:.data.title,date:.data.date,creator:(.meta.creatorSummary // ""),
+        dateAdded:(.data.dateAdded // ""),dateModified:(.data.dateModified // ""),
+        numChildren:(.meta.numChildren // 0)}' \
       "$WORK/items.json" >"$WORK/items.jsonl"
     next_skip=null
     if ((SKIP + count < total)); then
@@ -706,6 +667,8 @@ list_zotero_library() {
          title:(($item.title // "")|gsub("^\\s+|\\s+$";"")),
          year:(($item.date // "")|tostring|gsub("^\\s+|\\s+$";"")),
          creator:(($item.creator // "")|tostring|gsub("^\\s+|\\s+$";"")),
+         date_added:(($item.dateAdded // "")|tostring),
+         date_modified:(($item.dateModified // "")|tostring),
          has_pdf:($item.numChildren > 0),
          num_children:$item.numChildren,
          mapping:($st | mapping_for_item($type; $library; $key)),
