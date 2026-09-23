@@ -25,6 +25,9 @@ Rectangle {
     property bool collectionsVisible: false
     property bool hideOnRemarkable: false
     property string tagAlphaFilter: "All"
+    property string itemAlphaFilter: "All"
+    property string sortField: "dateModified"
+    property string sortDirection: "desc"
     property int activeIndex: -1
     property string lastQuery: ""
     property int lastSkip: 0
@@ -152,7 +155,8 @@ Rectangle {
     function querySignature() {
         var sortedTags = selectedTags.slice().sort();
         return JSON.stringify({q: searchInput.text, tags: sortedTags,
-            collection: selectedCollection, limit: pagination.limit});
+            collection: selectedCollection, limit: pagination.limit,
+            alpha: itemAlphaFilter, sort: sortField, direction: sortDirection});
     }
 
     function clearPageCache() {
@@ -178,6 +182,15 @@ Rectangle {
         }
     }
 
+    function commandTimeout(action) {
+        if (action === "import") return 60000;
+        // A letter filter has to page through the whole matching result set
+        // because Zotero cannot filter by first letter, so it can take far
+        // longer than an ordinary single-page listing.
+        if (action === "list" && itemAlphaFilter !== "All") return 180000;
+        return 30000;
+    }
+
     function run(arguments, action) {
         if (busy) return;
         busy = true;
@@ -188,7 +201,7 @@ Rectangle {
             "/home/root/xovi-zotero-bridge/scripts/zotbridge-run.sh"
         ].concat(arguments);
         appendLog("→ " + arguments.join(" "));
-        if (!bridgeCommand.startCommand(action === "import" ? 60000 : 30000)) {
+        if (!bridgeCommand.startCommand(commandTimeout(action))) {
             busy = false;
             status = "Could not start bridge command";
             appendLog("✕ could not start bridge command");
@@ -212,7 +225,12 @@ Rectangle {
 
     function listArguments(skip) {
         var args = ["list", "--page-info", "--limit", String(pagination.limit),
-                    "--skip", String(skip), "--query", searchInput.text];
+                    "--skip", String(skip), "--query", searchInput.text,
+                    "--sort", sortField, "--direction", sortDirection];
+        if (itemAlphaFilter !== "All") {
+            args.push("--starts-with");
+            args.push(itemAlphaFilter);
+        }
         for (var i = 0; i < selectedTags.length; i++) {
             args.push("--tag");
             args.push(selectedTags[i]);
@@ -241,7 +259,9 @@ Rectangle {
             return;
         }
         pendingCacheKey = key;
-        status = "Loading Zotero papers…";
+        status = (itemAlphaFilter === "All")
+            ? "Loading Zotero papers…"
+            : "Scanning library for titles starting with " + itemAlphaFilter + "… this can take a while";
         items = [];
         run(listArguments(skip), "list");
     }
@@ -372,8 +392,28 @@ Rectangle {
         return out;
     }
 
+    function setItemAlphaFilter(letter) {
+        if (itemAlphaFilter === letter) return;
+        itemAlphaFilter = letter;
+        activeIndex = -1;
+        loadPage(0);
+    }
+
+    function setSortField(field) {
+        if (sortField === field) {
+            sortDirection = (sortDirection === "asc") ? "desc" : "asc";
+        } else {
+            sortField = field;
+            // Names and creators read naturally A→Z; dates are most useful newest first.
+            sortDirection = (field === "title" || field === "creator") ? "asc" : "desc";
+        }
+        activeIndex = -1;
+        loadPage(0);
+    }
+
     function itemSubtitle(item) {
         var parts = [];
+        if (item.creator) parts.push(item.creator);
         if (item.year) parts.push(item.year);
         var count = (typeof item.num_children === "number") ? item.num_children : 0;
         parts.push("Estimated file items: " + count);
@@ -617,6 +657,117 @@ Rectangle {
                     anchors.fill: parent
                     enabled: !app.busy
                     onClicked: { app.loadPage(0); searchInput.focus = false; Qt.inputMethod.hide(); }
+                }
+            }
+        }
+
+        Row {
+            width: parent.width
+            spacing: 14
+            Flickable {
+                width: parent.width - 304
+                height: 60
+                clip: true
+                contentWidth: itemAlphaFilters.width
+                contentHeight: height
+                interactive: contentWidth > width
+                Row {
+                    id: itemAlphaFilters
+                    spacing: 8
+                    Repeater {
+                        model: ["All", "#", "A", "B", "C", "D", "E", "F", "G",
+                                "H", "I", "J", "K", "L", "M", "N", "O", "P",
+                                "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"]
+                        delegate: Rectangle {
+                            width: modelData === "All" ? 66 : 44
+                            height: 52
+                            color: app.itemAlphaFilter === modelData ? "black" : "white"
+                            border.width: 2
+                            border.color: "black"
+                            Text {
+                                anchors.centerIn: parent
+                                text: modelData
+                                color: app.itemAlphaFilter === modelData ? "white" : "black"
+                                font.pixelSize: 20
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                enabled: !app.busy
+                                onClicked: app.setItemAlphaFilter(modelData)
+                            }
+                        }
+                    }
+                }
+            }
+            Item {
+                width: 290
+                height: 60
+                Row {
+                    id: notOnRmFilter
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: 8
+                    Rectangle {
+                        width: 30
+                        height: 30
+                        anchors.verticalCenter: parent.verticalCenter
+                        border.width: 2
+                        border.color: "black"
+                        color: app.hideOnRemarkable ? "black" : "white"
+                        Text {
+                            anchors.centerIn: parent
+                            text: app.hideOnRemarkable ? "✓" : ""
+                            color: "white"
+                            font.pixelSize: 20
+                            font.bold: true
+                        }
+                    }
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: "Not on reMarkable"
+                        font.pixelSize: 18
+                    }
+                }
+                MouseArea {
+                    anchors.fill: notOnRmFilter
+                    onClicked: {
+                        app.hideOnRemarkable = !app.hideOnRemarkable;
+                        app.activeIndex = -1;
+                    }
+                }
+            }
+        }
+
+        Row {
+            width: parent.width
+            spacing: 10
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Sort"
+                font.pixelSize: 20
+            }
+            Repeater {
+                model: [{label: "Recent", field: "dateModified"},
+                        {label: "Name", field: "title"},
+                        {label: "Date added", field: "dateAdded"},
+                        {label: "Creator", field: "creator"}]
+                delegate: Rectangle {
+                    width: 180
+                    height: 52
+                    color: app.sortField === modelData.field ? "black" : "white"
+                    border.width: 2
+                    border.color: "black"
+                    Text {
+                        anchors.centerIn: parent
+                        text: modelData.label + (app.sortField === modelData.field
+                              ? (app.sortDirection === "asc" ? "  ▲" : "  ▼") : "")
+                        color: app.sortField === modelData.field ? "white" : "black"
+                        font.pixelSize: 19
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        enabled: !app.busy
+                        onClicked: app.setSortField(modelData.field)
+                    }
                 }
             }
         }
@@ -990,7 +1141,7 @@ Rectangle {
                 id: pageCountLabel
                 anchors.left: parent.left
                 anchors.verticalCenter: parent.verticalCenter
-                width: parent.width - notOnRmFilter.width - 16
+                width: parent.width
                 verticalAlignment: Text.AlignVCenter
                 horizontalAlignment: Text.AlignHCenter
                 text: "Page " + app.currentPage() + "/" + app.pageCount() +
@@ -998,39 +1149,6 @@ Rectangle {
                       (app.hiddenItemCount() > 0 ? "  ·  " + app.hiddenItemCount() + " hidden" : "")
                 font.pixelSize: 22
                 elide: Text.ElideRight
-            }
-            Row {
-                id: notOnRmFilter
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                spacing: 8
-                Rectangle {
-                    width: 30
-                    height: 30
-                    anchors.verticalCenter: parent.verticalCenter
-                    border.width: 2
-                    border.color: "black"
-                    color: app.hideOnRemarkable ? "black" : "white"
-                    Text {
-                        anchors.centerIn: parent
-                        text: app.hideOnRemarkable ? "✓" : ""
-                        color: "white"
-                        font.pixelSize: 20
-                        font.bold: true
-                    }
-                }
-                Text {
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: "Not on reMarkable"
-                    font.pixelSize: 18
-                }
-            }
-            MouseArea {
-                anchors.fill: notOnRmFilter
-                onClicked: {
-                    app.hideOnRemarkable = !app.hideOnRemarkable;
-                    app.activeIndex = -1;
-                }
             }
         }
 

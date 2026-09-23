@@ -76,10 +76,18 @@ elif path.endswith("/collections/top"):
 elif path.endswith("/items/top"):
     total = int(os.environ.get("FAKE_ITEM_TOTAL", "1"))
     num_children = int(os.environ.get("FAKE_ITEM_NUM_CHILDREN", "1"))
+    titles = json.loads(os.environ.get("FAKE_ITEM_TITLES", "[]"))
+    creators = json.loads(os.environ.get("FAKE_ITEM_CREATORS", "[]"))
     items = []
     for i in range(start, min(start + limit, total)):
         key = "ITEM1234" if i == 0 else f"ITEM{i:04}"
-        items.append({"key":key,"data":dict(data["data"],key=key),"meta":{"numChildren":num_children}})
+        item_data = dict(data["data"], key=key)
+        if titles:
+            item_data["title"] = titles[i % len(titles)]
+        meta = {"numChildren":num_children}
+        if creators:
+            meta["creatorSummary"] = creators[i % len(creators)]
+        items.append({"key":key,"data":item_data,"meta":meta})
     body = json.dumps(items).encode()
 elif re.search(r"/items/ITEM[A-Z0-9]{4}/children$", path):
     body = json.dumps([attachment]).encode()
@@ -377,6 +385,90 @@ class ShellSmokeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(json.loads(result.stdout)[0]["has_pdf"])
         self.assertEqual(json.loads(result.stdout)[0]["num_children"], 0)
+
+    def list_titles(self, *arguments):
+        """Run a --page-info listing and return (pagination, [titles])."""
+        result = self.run_cli("list", "--page-info", *arguments)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        return payload["pagination"], [item["title"] for item in payload["items"]]
+
+    def test_sort_and_direction_are_forwarded_to_zotero(self):
+        result = self.run_cli("list", "--limit", "5", "--json", "--sort", "title",
+                              "--direction", "asc")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        queries = [json.loads(line)["query"] for line in self.requests.read_text().splitlines()]
+        self.assertTrue(any("sort=title" in query and "direction=asc" in query for query in queries))
+
+    def test_listing_defaults_to_recently_modified_first(self):
+        self.run_cli("list", "--limit", "5", "--json")
+        queries = [json.loads(line)["query"] for line in self.requests.read_text().splitlines()]
+        self.assertTrue(any("sort=dateModified" in query and "direction=desc" in query
+                            for query in queries))
+
+    def test_sort_and_direction_reject_unsupported_values(self):
+        for arguments in (("--sort", "publisher"), ("--direction", "sideways")):
+            result = self.run_cli("list", *arguments)
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertEqual(json.loads(result.stdout)["error"], "ValueError")
+
+    def test_starts_with_filters_titles_across_every_page(self):
+        self.env["FAKE_ITEM_TOTAL"] = "5"
+        self.env["FAKE_ITEM_TITLES"] = json.dumps(
+            ["Alpha study", "  beta paper", "Gamma ray", "3D printing", "Zeta"])
+        pagination, titles = self.list_titles("--starts-with", "a")
+        # Lowercase "a" still matches "Alpha study", and the match is found even
+        # though a paged listing's first page would not have returned it alone.
+        self.assertEqual(titles, ["Alpha study"])
+        self.assertEqual(pagination["total"], 1)
+        self.assertFalse(pagination["has_more"])
+        # Leading whitespace is ignored when deciding the first letter.
+        _, titles = self.list_titles("--starts-with", "B")
+        self.assertEqual(titles, ["beta paper"])
+
+    def test_starts_with_hash_selects_titles_that_do_not_start_with_a_letter(self):
+        self.env["FAKE_ITEM_TOTAL"] = "4"
+        self.env["FAKE_ITEM_TITLES"] = json.dumps(["Alpha", "3D printing", "Beta", "!bang"])
+        _, titles = self.list_titles("--starts-with", "#")
+        self.assertEqual(titles, ["3D printing", "!bang"])
+
+    def test_starts_with_paginates_over_the_filtered_total(self):
+        self.env["FAKE_ITEM_TOTAL"] = "6"
+        self.env["FAKE_ITEM_TITLES"] = json.dumps(
+            ["Aa", "Zz", "Ab", "Yy", "Ac", "Xx"])
+        first, titles = self.list_titles("--starts-with", "A", "--limit", "2")
+        self.assertEqual(titles, ["Aa", "Ab"])
+        # The reported total is the filtered count, not the library total.
+        self.assertEqual(first["total"], 3)
+        self.assertTrue(first["has_more"])
+        self.assertEqual(first["next_skip"], 2)
+        second, titles = self.list_titles("--starts-with", "A", "--limit", "2",
+                                          "--skip", str(first["next_skip"]))
+        self.assertEqual(titles, ["Ac"])
+        self.assertFalse(second["has_more"])
+
+    def test_starts_with_scans_full_pages_rather_than_the_requested_limit(self):
+        self.env["FAKE_ITEM_TOTAL"] = "3"
+        self.env["FAKE_ITEM_TITLES"] = json.dumps(["Aa", "Ab", "Ac"])
+        self.list_titles("--starts-with", "A", "--limit", "1")
+        queries = [json.loads(line)["query"] for line in self.requests.read_text().splitlines()]
+        self.assertTrue(any("limit=100" in query for query in queries))
+
+    def test_starts_with_rejects_multi_character_values(self):
+        result = self.run_cli("list", "--starts-with", "ab")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertEqual(json.loads(result.stdout)["error"], "ValueError")
+
+    def test_listing_reports_the_creator_summary(self):
+        self.env["FAKE_ITEM_CREATORS"] = json.dumps(["Darwin"])
+        result = self.run_cli("list", "--limit", "5", "--json")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)[0]["creator"], "Darwin")
+
+    def test_listing_reports_an_empty_creator_when_zotero_omits_one(self):
+        result = self.run_cli("list", "--limit", "5", "--json")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)[0]["creator"], "")
 
     def test_list_plain_text_shows_estimated_file_item_count_not_pdf_marker(self):
         result = self.run_cli("list", "--limit", "5")
