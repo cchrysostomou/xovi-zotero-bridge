@@ -42,6 +42,8 @@ reduce (split("\n")[] | sub("\r$"; "")
 | .sync_synced_tag = (.sync_synced_tag // "synced")
 | .list_page_limit = (.list_page_limit // 8)
 | checked(.list_page_limit | type == "number" and floor == . and . >= 1 and . <= 100)
+| .list_cache_ttl_s = (.list_cache_ttl_s // 86400)
+| checked(.list_cache_ttl_s | type == "number" and floor == . and . >= 0)
 | checked([.default_target_folder,.reverse_sync_folder] | all(
     text and (split("/") | all(gsub("^\\s+|\\s+$";"") | length>0))
     and (test("^(?:urn:uuid:)?\\{?[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}\\}?$") | not)))

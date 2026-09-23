@@ -156,6 +156,15 @@ displayed pages.
 passed through to Zotero, which sorts before paginating. Sorting defaults to
 `dateModified` descending.
 
+`--refresh` bypasses that cache and refetches from Zotero, replacing the stored
+entry; the app's Refresh button uses it. Listing pages are otherwise cached on
+disk beside the state file in `<state_json_path>.list-cache.json` for
+`list_cache_ttl_s` seconds (default `86400`, i.e. 24 hours; `0` disables
+caching). The cache holds only the fields Zotero returned, so import mappings
+are re-applied from live state on every listing and a cached page still shows
+current reMarkable badges. It is capped at the 60 most recent entries and
+expired entries are dropped on write.
+
 Existing `list --json` callers still receive an array. For a UI, use `--page-info`,
 which implies JSON and returns:
 

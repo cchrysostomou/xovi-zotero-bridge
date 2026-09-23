@@ -63,6 +63,9 @@ Rectangle {
     // rather than fatal; only a repeatedly failing offset abandons the walk.
     property int prefetchRetries: 0
     property int prefetchMaxRetries: 3
+    // Set by the Refresh button so the next walk re-queries Zotero instead of
+    // reusing the backend's 24h on-disk cache.
+    property bool prefetchForceRefresh: false
     // The walk uses full 100-item pages rather than the UI's page size: a
     // 650-item library is ~7 requests instead of ~80, which matters because
     // each round trip to Zotero has been measured at 0.6-11s.
@@ -197,7 +200,7 @@ Rectangle {
             collection: selectedCollection});
     }
 
-    function resetDataset() {
+    function resetDataset(forceRefresh) {
         datasetKey = datasetSignature();
         datasetItems = [];
         datasetSeen = {};
@@ -206,6 +209,7 @@ Rectangle {
         datasetFailed = false;
         prefetchSkip = 0;
         prefetchRetries = 0;
+        prefetchForceRefresh = (forceRefresh === true);
         prefetchNote = "";
     }
 
@@ -216,6 +220,10 @@ Rectangle {
         var args = ["list", "--page-info", "--limit", String(prefetchPageSize),
                     "--skip", String(skip), "--query", searchInput.text,
                     "--sort", "dateAdded", "--direction", "desc"];
+        // Only the first page of a user-requested refresh needs to bypass the
+        // backend's 24h cache; once it is refetched the rest of the walk can
+        // reuse whatever is still fresh.
+        if (prefetchForceRefresh) args.push("--refresh");
         for (var i = 0; i < selectedTags.length; i++) {
             args.push("--tag");
             args.push(selectedTags[i]);
@@ -271,6 +279,7 @@ Rectangle {
         }
         if (datasetSignature() !== datasetKey) return;
         prefetchRetries = 0;
+        prefetchForceRefresh = false;
         var fetched = result.items || [];
         var merged = datasetItems.slice();
         for (var i = 0; i < fetched.length; i++) {
@@ -391,10 +400,11 @@ Rectangle {
         run(["settings", "--json"], "settings");
     }
 
-    function listArguments(skip) {
+    function listArguments(skip, forceRefresh) {
         var args = ["list", "--page-info", "--limit", String(pagination.limit),
                     "--skip", String(skip), "--query", searchInput.text,
                     "--sort", sortField, "--direction", sortDirection];
+        if (forceRefresh) args.push("--refresh");
         for (var i = 0; i < selectedTags.length; i++) {
             args.push("--tag");
             args.push(selectedTags[i]);
@@ -409,7 +419,7 @@ Rectangle {
     function loadPage(skip, forceRefresh) {
         lastQuery = searchInput.text;
         lastSkip = skip;
-        if (forceRefresh || datasetSignature() !== datasetKey) resetDataset();
+        if (forceRefresh || datasetSignature() !== datasetKey) resetDataset(forceRefresh);
         // Once the whole result set is cached, paging and re-sorting are pure
         // local work: no Zotero request at all.
         if (datasetComplete) {
@@ -430,9 +440,9 @@ Rectangle {
             return;
         }
         pendingCacheKey = key;
-        status = "Loading Zotero papers…";
+        status = forceRefresh ? "Refreshing from Zotero…" : "Loading Zotero papers…";
         items = [];
-        run(listArguments(skip), "list");
+        run(listArguments(skip, forceRefresh), "list");
     }
 
     function refreshCurrentPage() {

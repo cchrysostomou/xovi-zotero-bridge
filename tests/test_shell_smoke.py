@@ -382,10 +382,72 @@ class ShellSmokeTests(unittest.TestCase):
         requests = [json.loads(line) for line in self.requests.read_text().splitlines()]
         self.assertFalse(any(request["path"].endswith("/children") for request in requests))
         self.env["FAKE_ITEM_NUM_CHILDREN"] = "0"
-        result = self.run_cli("list", "--limit", "5", "--json")
+        # --refresh because the identical listing above is now cached on disk.
+        result = self.run_cli("list", "--limit", "5", "--json", "--refresh")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(json.loads(result.stdout)[0]["has_pdf"])
         self.assertEqual(json.loads(result.stdout)[0]["num_children"], 0)
+
+    def item_requests(self):
+        return [json.loads(line) for line in self.requests.read_text().splitlines()
+                if json.loads(line)["path"].endswith("/items/top")]
+
+    def test_repeated_listing_is_served_from_the_on_disk_cache(self):
+        self.assertEqual(self.run_cli("list", "--limit", "5", "--json").returncode, 0)
+        first = len(self.item_requests())
+        self.assertEqual(self.run_cli("list", "--limit", "5", "--json").returncode, 0)
+        # The second identical listing must not reach Zotero at all.
+        self.assertEqual(len(self.item_requests()), first)
+        self.assertTrue((self.root / "state.db.json.list-cache.json").exists())
+
+    def test_cached_listing_returns_the_same_payload(self):
+        live = self.run_cli("list", "--limit", "5", "--json")
+        cached = self.run_cli("list", "--limit", "5", "--json")
+        self.assertEqual(json.loads(live.stdout), json.loads(cached.stdout))
+
+    def test_refresh_bypasses_and_replaces_the_cached_listing(self):
+        self.run_cli("list", "--limit", "5", "--json")
+        before = len(self.item_requests())
+        result = self.run_cli("list", "--limit", "5", "--json", "--refresh")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(self.item_requests()), before + 1)
+
+    def test_a_different_page_or_sort_is_cached_separately(self):
+        self.run_cli("list", "--limit", "5", "--json")
+        before = len(self.item_requests())
+        self.run_cli("list", "--limit", "5", "--json", "--skip", "5")
+        self.run_cli("list", "--limit", "5", "--json", "--sort", "title")
+        self.assertEqual(len(self.item_requests()), before + 2)
+
+    def test_expired_cache_entries_are_refetched(self):
+        self.config.write_text(self.config.read_text() + "\nlist_cache_ttl_s = 0\n")
+        self.run_cli("list", "--limit", "5", "--json")
+        before = len(self.item_requests())
+        self.run_cli("list", "--limit", "5", "--json")
+        # A zero TTL disables the cache, so every listing goes to Zotero.
+        self.assertEqual(len(self.item_requests()), before + 1)
+
+    def test_cached_listing_still_reflects_new_import_mappings(self):
+        first = self.run_cli("list", "--limit", "5", "--json")
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertIsNone(json.loads(first.stdout)[0]["mapping"])
+        # Record a mapping directly; the point is that the cached page picks it
+        # up, not how the import got there.
+        state = self.root / "state.db.json"
+        stored = json.loads(state.read_text()) if state.exists() else {
+            "version": 1, "mappings": {}, "attempts": {},
+            "tag_cache": {}, "collection_cache": {}}
+        stored["mappings"]["e90be5e8-32f6-46ec-bb75-32d827af9eee"] = {
+            "zotero_library_type": "user", "zotero_library_id": "123",
+            "zotero_item_key": "ITEM1234", "zotero_attachment_key": "HOSTED12",
+            "rm_path": "Zotero/unread", "state": "imported"}
+        state.write_text(json.dumps(stored))
+        before = len(self.item_requests())
+        cached = self.run_cli("list", "--limit", "5", "--json")
+        self.assertEqual(cached.returncode, 0, cached.stdout + cached.stderr)
+        # Served from cache (no new request) yet the live mapping is applied.
+        self.assertEqual(len(self.item_requests()), before)
+        self.assertIsNotNone(json.loads(cached.stdout)[0]["mapping"])
 
     def test_sort_and_direction_are_forwarded_to_zotero(self):
         result = self.run_cli("list", "--limit", "5", "--json", "--sort", "title",

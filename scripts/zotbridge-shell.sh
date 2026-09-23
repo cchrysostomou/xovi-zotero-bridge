@@ -123,7 +123,7 @@ fi
 
 if [[ ${1:-} == --help || ${1:-} == -h || $# == 0 ]]; then
     printf '%s\n' 'Usage: zotbridge-run.sh list [--query TEXT] [--tag NAME ...] [--collection KEY] [--limit 1..100] [--skip N] [--json] [--page-info]' \
-      '                        [--sort title|creator|dateAdded|dateModified] [--direction asc|desc]' \
+      '                        [--sort title|creator|dateAdded|dateModified] [--direction asc|desc] [--refresh]' \
       '       zotbridge-run.sh tags [--query TEXT] [--json] [--refresh]' \
       '       zotbridge-run.sh collections [--json] [--refresh]' \
       '       zotbridge-run.sh clear-mappings' \
@@ -186,7 +186,7 @@ while (($#)); do
         --synced-tag) [[ $COMMAND =~ ^sync-(tagged|item)$ && $# -ge 2 ]] || fail ValueError "Invalid --synced-tag option."; SYNCED_TAG=$2; SYNCED_TAG_SET=true; shift 2 ;;
         --page-info) [[ $COMMAND == list ]] || fail ValueError "Invalid --page-info option."; PAGE_INFO=true; shift ;;
         --json) [[ $COMMAND =~ ^(list|tags|collections|settings|children)$ ]] || fail ValueError "Invalid --json option."; AS_JSON=true; shift ;;
-        --refresh) [[ $COMMAND =~ ^(tags|collections)$ ]] || fail ValueError "--refresh is only supported by tags and collections."; REFRESH=true; shift ;;
+        --refresh) [[ $COMMAND =~ ^(tags|collections|list)$ ]] || fail ValueError "--refresh is only supported by tags, collections and list."; REFRESH=true; shift ;;
         --item-key) [[ $COMMAND =~ ^(import|status|check-connection|sync-item|children)$ && $# -ge 2 ]] || fail ValueError "Invalid --item-key option."; ITEM_KEY=$2; shift 2 ;;
         --attachment-key) [[ $COMMAND == import && $# -ge 2 ]] || fail ValueError "Invalid --attachment-key option."; ATTACHMENT_KEY_OPT=$2; shift 2 ;;
         --target-folder) [[ $COMMAND =~ ^(import|ensure-folder|sync-tagged|sync-item)$ && $# -ge 2 ]] || fail ValueError "Invalid --target-folder option."; TARGET=$2; TARGET_GIVEN=true; shift 2 ;;
@@ -304,7 +304,8 @@ get_config() { "$JQ" -r ".$1" "$WORK/config.json"; }
    CFG_USE_WEBDAV:.use_webdav, CFG_LIBRARY_TYPE:.library_type,
    CFG_LIBRARY_ID:.library_id, CFG_BROKER_TIMEOUT:.broker_timeout_s,
    CFG_ZOTERO_TIMEOUT:.zotero_timeout_s, CFG_WEBDAV_TIMEOUT:.webdav_timeout_s,
-   CFG_ZOTERO_MAX_MB:.zotero_max_download_mb, CFG_WEBDAV_MAX_MB:.webdav_max_download_mb}
+   CFG_ZOTERO_MAX_MB:.zotero_max_download_mb, CFG_WEBDAV_MAX_MB:.webdav_max_download_mb,
+   CFG_LIST_CACHE_TTL:.list_cache_ttl_s}
   | to_entries
   | if all(.[]; .value != null) then . else error("missing configuration value") end
   | .[] | "\(.key)=\(.value|tostring|@sh)"' "$WORK/config.json" >"$WORK/config.env" ||
@@ -326,6 +327,11 @@ absolute_path "$CFG_STATE"; STATE=$REPLY
 absolute_path "$CFG_SQLITE_STATE"; SQLITE_STATE=$REPLY
 [[ $STATE != "$SQLITE_STATE" ]] || fail configuration_error "state_json_path must differ from state_db_path; SQLite files are never migrated or overwritten."
 ACTIVITY_LOG="$STATE.activity.jsonl"
+# Listing pages are cached beside the state file rather than inside it, so a
+# large page cache can never put the import mappings at risk.
+LIST_CACHE="$STATE.list-cache.json"
+LIST_CACHE_TTL=$CFG_LIST_CACHE_TTL
+LIST_CACHE_MAX_ENTRIES=60
 [[ ! -L $ACTIVITY_LOG ]] || fail activity_log_error "Activity log must not be a symbolic link."
 [[ ! -e $ACTIVITY_LOG || -f $ACTIVITY_LOG ]] ||
     fail activity_log_error "Activity log must be a regular file."
@@ -617,8 +623,61 @@ total_results() {
       fail zotero_error "Zotero response is missing a valid Total-Results header."
 }
 
+list_cache_get() {
+    # Returns 0 and fills $WORK/items.jsonl when a fresh entry exists. The cache
+    # stores the projected Zotero fields only; import mappings are re-applied
+    # from live state afterwards, so a cached page still shows current badges.
+    LIST_CACHE_TOTAL=0
+    [[ $REFRESH == false ]] || return 1
+    ((LIST_CACHE_TTL > 0)) || return 1
+    [[ -f $LIST_CACHE && ! -L $LIST_CACHE ]] || return 1
+    LIST_CACHE_TOTAL="$("$JQ" -e --arg key "$LIBRARY_SCOPE|$1" --argjson ttl "$LIST_CACHE_TTL" '
+      (.entries[$key] // empty)
+      | select((.fetched_at|type=="number") and (now - .fetched_at) < $ttl and (.items|type=="array"))
+      | .total' "$LIST_CACHE" 2>/dev/null)" || return 1
+    [[ $LIST_CACHE_TOTAL =~ ^[0-9]+$ ]] || return 1
+    "$JQ" -c --arg key "$LIBRARY_SCOPE|$1" '.entries[$key].items[]' \
+      "$LIST_CACHE" >"$WORK/items.jsonl" 2>/dev/null || return 1
+    return 0
+}
+
+list_cache_put() {
+    # Best effort: a cache write must never fail a listing that already
+    # succeeded. Concurrent writers (the UI page and the background walk run at
+    # the same time) are last-writer-wins, which can only lose an entry that is
+    # then refetched later, never corrupt the file.
+    ((LIST_CACHE_TTL > 0)) || return 0
+    [[ ! -L $LIST_CACHE ]] || return 0
+    local stage
+    stage="$LIST_CACHE.new.$$.$RANDOM"
+    if [[ -f $LIST_CACHE ]]; then
+        "$JQ" '.' "$LIST_CACHE" >"$WORK/list-cache.json" 2>/dev/null ||
+          printf '%s\n' '{"version":1,"entries":{}}' >"$WORK/list-cache.json"
+    else
+        printf '%s\n' '{"version":1,"entries":{}}' >"$WORK/list-cache.json"
+    fi    # Every step is guarded: `set -Eeuo pipefail` installs an ERR trap, so an
+    # unguarded failure here (a missing `mv`, a full disk) would abort a
+    # listing that has already succeeded.
+    if "$JQ" --arg key "$LIBRARY_SCOPE|$1" --argjson total "$2" \
+      --argjson ttl "$LIST_CACHE_TTL" --argjson max "$LIST_CACHE_MAX_ENTRIES" \
+      --slurpfile items "$WORK/items.jsonl" '
+      def entries_object: (if type=="object" then . else {} end);
+      {version:1,
+       entries: ((.entries|entries_object)
+         + {($key): {fetched_at:(now|floor), total:$total, items:$items}}
+         | with_entries(select((.value.fetched_at|type=="number")
+             and (now - .value.fetched_at) < $ttl))
+         | to_entries | sort_by(.value.fetched_at) | reverse | .[:$max] | from_entries)}' \
+      "$WORK/list-cache.json" >"$stage" 2>/dev/null; then
+        mv -f -- "$stage" "$LIST_CACHE" 2>/dev/null || rm -f -- "$stage" 2>/dev/null || :
+    else
+        rm -f -- "$stage" 2>/dev/null || :
+    fi
+    return 0
+}
+
 list_zotero_library() {
-    local encoded_query tag_parameter= encoded_tags total count next_skip base_path
+    local encoded_query tag_parameter= encoded_tags total count next_skip base_path request_path
     load_state
     encoded_query="$(printf '%s' "$QUERY" | "$JQ" -Rrs '@uri')"
     if ((${#TAGS[@]})); then
@@ -634,17 +693,24 @@ list_zotero_library() {
     base_path="items/top"
     [[ -z $COLLECTION ]] || base_path="collections/$COLLECTION/items/top"
     # Zotero permits one itemType parameter; leading '-' negates the OR group.
-    metadata "$base_path?limit=$LIMIT&start=$SKIP&q=$encoded_query&itemType=-attachment%20%7C%7C%20note%20%7C%7C%20annotation&sort=$SORT&direction=$DIRECTION$tag_parameter" "$WORK/items.json"
-    "$JQ" -e 'type=="array"' "$WORK/items.json" >/dev/null || fail zotero_error "Invalid item list."
-    total_results
-    total=$TOTAL_RESULTS
-    count="$("$JQ" 'length' "$WORK/items.json")"
-    ((count <= LIMIT)) || fail zotero_error "Zotero returned an oversized page."
-    "$JQ" -c '.[]|select(.data.itemType!="attachment" and .data.itemType!="note" and .data.itemType!="annotation")
-      |{key:.data.key,title:.data.title,date:.data.date,creator:(.meta.creatorSummary // ""),
-        dateAdded:(.data.dateAdded // ""),dateModified:(.data.dateModified // ""),
-        numChildren:(.meta.numChildren // 0)}' \
-      "$WORK/items.json" >"$WORK/items.jsonl"
+    request_path="$base_path?limit=$LIMIT&start=$SKIP&q=$encoded_query&itemType=-attachment%20%7C%7C%20note%20%7C%7C%20annotation&sort=$SORT&direction=$DIRECTION$tag_parameter"
+    if list_cache_get "$request_path"; then
+        total=$LIST_CACHE_TOTAL
+        count="$("$JQ" -s 'length' "$WORK/items.jsonl")"
+    else
+        metadata "$request_path" "$WORK/items.json"
+        "$JQ" -e 'type=="array"' "$WORK/items.json" >/dev/null || fail zotero_error "Invalid item list."
+        total_results
+        total=$TOTAL_RESULTS
+        count="$("$JQ" 'length' "$WORK/items.json")"
+        ((count <= LIMIT)) || fail zotero_error "Zotero returned an oversized page."
+        "$JQ" -c '.[]|select(.data.itemType!="attachment" and .data.itemType!="note" and .data.itemType!="annotation")
+          |{key:.data.key,title:.data.title,date:.data.date,creator:(.meta.creatorSummary // ""),
+            dateAdded:(.data.dateAdded // ""),dateModified:(.data.dateModified // ""),
+            numChildren:(.meta.numChildren // 0)}' \
+          "$WORK/items.json" >"$WORK/items.jsonl"
+        list_cache_put "$request_path" "$total"
+    fi
     next_skip=null
     if ((SKIP + count < total)); then
         ((count > 0)) || fail zotero_error "Zotero returned an empty page before the end; refresh the listing."
