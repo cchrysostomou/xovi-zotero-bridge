@@ -57,8 +57,6 @@ AFFECT [[12599552112012170435]]
                     property string tagFilter: "All"
                     property bool tagsVisible: false
                     property string commandError: ""
-                    property bool rmapiInstalled: false
-                    property bool rmapiPaired: false
                     property bool busy: false
 
                     function filteredTags() {
@@ -77,6 +75,19 @@ AFFECT [[12599552112012170435]]
                         return tags.filter(function(tag) {
                             return tag.length > 0 && tag.charAt(0).toUpperCase() === tagFilter;
                         });
+                    }
+
+                    function dismissKeyboard() {
+                        urlInput.focus = false;
+                        usernameInput.focus = false;
+                        passwordInput.focus = false;
+                        folderInput.focus = false;
+                        listPageLimitInput.focus = false;
+                        queueInput.focus = false;
+                        syncedInput.focus = false;
+                        reverseFolderInput.focus = false;
+                        openTagPicker = "";
+                        Qt.inputMethod.hide();
                     }
 
                     AsyncCommandExecutor {
@@ -134,10 +145,6 @@ AFFECT [[12599552112012170435]]
                                 "Zotero API and WebDAV are reachable" : "Connection test incomplete";
                         } else if (result.webdav && typeof result.webdav === "object") {
                             settings = result;
-                            rmapiInstalled = !!(result.rmapi && result.rmapi.installed);
-                            rmapiPaired = !!(result.rmapi && result.rmapi.paired);
-                            rmapiHint.text = "Paired status: " + (rmapiPaired ? "✓" : "✕") +
-                                (rmapiInstalled ? "" : " (rmapi unavailable)");
                             urlInput.text = result.webdav.url || "";
                             usernameInput.text = result.webdav.username || "";
                             passwordInput.text = "";
@@ -145,18 +152,11 @@ AFFECT [[12599552112012170435]]
                             reverseFolderInput.text = result.reverse_sync_folder || "Zotero/Read";
                             queueTag = result.sync_queue_tag || "";
                             syncedTag = result.sync_synced_tag || "";
+                            listPageLimitInput.text = String(result.list_page_limit || 8);
                             passwordHint.text = result.webdav.password_set ?
                                 "Password stored; leave blank to keep it" : "No password stored";
                             status = result.applied ? "Settings saved" : "Settings loaded";
                             if (!result.applied) run(["tags", "--json"]);
-                        } else if (result.rmapi) {
-                            rmapiInstalled = !!result.rmapi.installed;
-                            rmapiPaired = !!result.rmapi.paired;
-                            rmapiCode.text = "";
-                            rmapiHint.text = "Paired status: " + (rmapiPaired ? "✓" : "✕") +
-                                (rmapiInstalled ? "" : " (rmapi unavailable)");
-                            status = rmapiPaired ? "reMarkable Cloud pairing complete" :
-                                "reMarkable Cloud is not paired";
                         } else if (result.entries) {
                             events = result.entries.slice().reverse();
                             status = "Loaded " + result.entries.length + " log events";
@@ -169,6 +169,9 @@ AFFECT [[12599552112012170435]]
                     }
 
                     function saveSettings() {
+                        var parsedLimit = parseInt(listPageLimitInput.text, 10);
+                        if (isNaN(parsedLimit)) parsedLimit = 8;
+                        parsedLimit = Math.max(1, Math.min(100, parsedLimit));
                         var draft = {
                             version: 1,
                             webdav_url: urlInput.text,
@@ -176,7 +179,8 @@ AFFECT [[12599552112012170435]]
                             default_target_folder: folderInput.text,
                             reverse_sync_folder: reverseFolderInput.text,
                             sync_queue_tag: queueTag,
-                            sync_synced_tag: syncedTag
+                            sync_synced_tag: syncedTag,
+                            list_page_limit: parsedLimit
                         };
                         if (passwordInput.text.length > 0) draft.webdav_password = passwordInput.text;
                         var request = new XMLHttpRequest();
@@ -192,28 +196,13 @@ AFFECT [[12599552112012170435]]
                         request.send(JSON.stringify(draft));
                     }
 
-                    function pairRmapi() {
-                        if (rmapiCode.text.length !== 8) {
-                            status = "Pairing code must contain exactly eight characters";
-                            return;
-                        }
-                        var draft = {version: 1, code: rmapiCode.text};
-                        rmapiCode.text = "";
-                        var request = new XMLHttpRequest();
-                        request.open("PUT", "file:///home/root/xovi-zotero-bridge/.zotbridge-rmapi-pair-draft.json");
-                        request.onreadystatechange = function() {
-                            if (request.readyState !== XMLHttpRequest.DONE) return;
-                            if (request.status !== 0 && (request.status < 200 || request.status >= 300)) {
-                                bridgeSettings.status = "Could not save pairing draft";
-                                return;
-                            }
-                            bridgeSettings.run([bridgeSettings.rmapiPaired ? "rmapi-repair" : "rmapi-pair"]);
-                        };
-                        request.send(JSON.stringify(draft));
-                    }
-
                     Component.onCompleted: {
                         run(["settings", "--json"]);
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: bridgeSettings.dismissKeyboard()
                     }
 
                     Flickable {
@@ -232,16 +221,42 @@ AFFECT [[12599552112012170435]]
                             Text { text: bridgeSettings.status; font.pixelSize: 22; wrapMode: Text.WordWrap; width: parent.width }
                             Text { text: "WebDAV storage"; font.pixelSize: 30; font.bold: true }
                             Text { text: "Server URL (HTTPS)"; font.pixelSize: 22 }
-                            TextInput { id: urlInput; width: parent.width; font.pixelSize: 24; selectByMouse: true }
+                            TextInput { id: urlInput; width: parent.width; font.pixelSize: 24; selectByMouse: true
+                                Keys.onReturnPressed: bridgeSettings.dismissKeyboard()
+                                Keys.onEnterPressed: bridgeSettings.dismissKeyboard()
+                            }
                             Rectangle { width: parent.width; height: 2; color: "black" }
                             Text { text: "Username"; font.pixelSize: 22 }
-                            TextInput { id: usernameInput; width: parent.width; font.pixelSize: 24; selectByMouse: true }
+                            TextInput { id: usernameInput; width: parent.width; font.pixelSize: 24; selectByMouse: true
+                                Keys.onReturnPressed: bridgeSettings.dismissKeyboard()
+                                Keys.onEnterPressed: bridgeSettings.dismissKeyboard()
+                            }
                             Rectangle { width: parent.width; height: 2; color: "black" }
                             Text { text: "Password"; font.pixelSize: 22 }
-                            TextInput { id: passwordInput; width: parent.width; font.pixelSize: 24; echoMode: TextInput.Password; selectByMouse: true }
+                            TextInput { id: passwordInput; width: parent.width; font.pixelSize: 24; echoMode: TextInput.Password; selectByMouse: true
+                                Keys.onReturnPressed: bridgeSettings.dismissKeyboard()
+                                Keys.onEnterPressed: bridgeSettings.dismissKeyboard()
+                            }
                             Text { id: passwordHint; font.pixelSize: 18 }
                             Text { text: "reMarkable folder path"; font.pixelSize: 22 }
-                            TextInput { id: folderInput; width: parent.width; font.pixelSize: 24; selectByMouse: true }
+                            TextInput { id: folderInput; width: parent.width; font.pixelSize: 24; selectByMouse: true
+                                Keys.onReturnPressed: bridgeSettings.dismissKeyboard()
+                                Keys.onEnterPressed: bridgeSettings.dismissKeyboard()
+                            }
+                            Rectangle { width: parent.width; height: 2; color: "black" }
+                            Text { text: "List page size (1-100)"; font.pixelSize: 22 }
+                            TextInput {
+                                id: listPageLimitInput
+                                width: parent.width; font.pixelSize: 24; selectByMouse: true
+                                text: "8"
+                                maximumLength: 3
+                                onTextChanged: {
+                                    var digitsOnly = text.replace(/[^0-9]/g, "");
+                                    if (digitsOnly !== text) text = digitsOnly;
+                                }
+                                Keys.onReturnPressed: bridgeSettings.dismissKeyboard()
+                                Keys.onEnterPressed: bridgeSettings.dismissKeyboard()
+                            }
                             Rectangle { width: parent.width; height: 2; color: "black" }
                             Text { text: "Queue tag"; font.pixelSize: 22 }
                             Rectangle {
@@ -260,6 +275,8 @@ AFFECT [[12599552112012170435]]
                                         if (activeFocus && bridgeSettings.tags.length > 0)
                                             bridgeSettings.openTagPicker = "queue";
                                     }
+                                    Keys.onReturnPressed: bridgeSettings.dismissKeyboard()
+                                    Keys.onEnterPressed: bridgeSettings.dismissKeyboard()
                                 }
                             }
                             Text { text: "Completion tag"; font.pixelSize: 22 }
@@ -279,6 +296,8 @@ AFFECT [[12599552112012170435]]
                                         if (activeFocus && bridgeSettings.tags.length > 0)
                                             bridgeSettings.openTagPicker = "synced";
                                     }
+                                    Keys.onReturnPressed: bridgeSettings.dismissKeyboard()
+                                    Keys.onEnterPressed: bridgeSettings.dismissKeyboard()
                                 }
                             }
                             Flickable {
@@ -303,6 +322,7 @@ AFFECT [[12599552112012170435]]
                                                     queueInput.focus = false;
                                                     syncedInput.focus = false;
                                                     bridgeSettings.openTagPicker = "";
+                                                    Qt.inputMethod.hide();
                                                 }
                                             }
                                         }
@@ -329,49 +349,10 @@ AFFECT [[12599552112012170435]]
                                 id: reverseFolderInput
                                 width: parent.width; font.pixelSize: 24; selectByMouse: true
                                 text: "Zotero/Read"
+                                Keys.onReturnPressed: bridgeSettings.dismissKeyboard()
+                                Keys.onEnterPressed: bridgeSettings.dismissKeyboard()
                             }
                             Rectangle { width: parent.width; height: 2; color: "black" }
-                            Text {
-                                text: "Generate a desktop code at my.remarkable.com/device/browser/connect"
-                                width: parent.width; font.pixelSize: 18; wrapMode: Text.WordWrap
-                            }
-                            Text {
-                                id: rmapiHint
-                                text: "Paired status: " + (bridgeSettings.rmapiPaired ? "✓" : "✕")
-                                font.pixelSize: 20
-                            }
-                            Row {
-                                spacing: 16
-                                Rectangle {
-                                    width: 280; height: 64
-                                    color: "white"
-                                    border.width: 2; border.color: "black"
-                                    TextInput {
-                                        id: rmapiCode
-                                        anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12
-                                        font.pixelSize: 24; selectByMouse: true
-                                        enabled: bridgeSettings.rmapiInstalled
-                                        maximumLength: 8
-                                    }
-                                }
-                                Rectangle {
-                                    width: 220; height: 64
-                                    color: (!bridgeSettings.busy && bridgeSettings.rmapiInstalled &&
-                                            rmapiCode.text.length === 8) ?
-                                           "black" : "#aaaaaa"
-                                    Text {
-                                        anchors.centerIn: parent
-                                        text: bridgeSettings.rmapiPaired ? "Re-pair" : "Pair"
-                                        color: "white"; font.pixelSize: 24
-                                    }
-                                    MouseArea {
-                                        anchors.fill: parent
-                                        enabled: !bridgeSettings.busy && bridgeSettings.rmapiInstalled &&
-                                                 rmapiCode.text.length === 8
-                                        onClicked: bridgeSettings.pairRmapi()
-                                    }
-                                }
-                            }
                             Text { text: "Available Zotero tags"; font.pixelSize: 30; font.bold: true }
                             Row {
                                 spacing: 16

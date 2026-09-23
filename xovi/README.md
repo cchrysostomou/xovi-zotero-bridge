@@ -43,6 +43,58 @@ XOVI resource build: QMLDiff selectors are intentionally firmware-specific. Keep
 the existing Bluetooth QMD installed; the Zotero patch adds a separate button after
 the same anchor. To uninstall, remove only `zoteroQuickSync.qmd` and restart XOVI.
 
+## Reader "Send to Zotero" button (3.28 only)
+
+`xovi/3.28/zoteroSendToZotero.qmd` adds a toolbar icon (falling back to a
+Settings/More Tools menu entry when the toolbar is cramped) to the document
+reader. Tapping it opens a full-screen dialog that sends the open document
+directly to Zotero over WebDAV — no folder duplication and no reverse-sync
+wait step.
+
+If the document already has a Zotero item (via `doc-status`), the dialog
+skips the new/attach choice entirely and shows two independent checkboxes:
+"Send PDF + markup" and "Markup only". The already-uploaded unmarked PDF is
+never resent. If neither box is checked, no attachment is uploaded, but any
+changed tag selection is still applied to the existing item.
+
+If the document has no Zotero item yet, the dialog offers "Create new item"
+or "Attach to existing item" (with search), plus three independent
+checkboxes: "Send unmarked PDF" (checked by default), "Send PDF + markup",
+and "Markup only". At least one must stay checked.
+
+Checked variants map to distinct attachment filenames: the unmarked PDF as
+`<name>.pdf`, the merged PDF-with-markup as `<name>.rm.pdf`, and the
+annotated-pages-only PDF as `<name>.rm.annot.pdf`. If a merged/markup-only
+variant is requested but the document has no annotations at all, that
+variant is silently skipped (nothing new to send) rather than uploading an
+unchanged copy of the plain PDF under a markup filename. Tag changes always
+apply regardless of which variants were sent.
+
+It calls the existing `doc-status` and `doc-tags` bridge commands to read
+current state, and the new `send-to-zotero` command
+(`--uuid`, `--mode {new,attach}`, `--parent-key`, `--collection`, `--tags`,
+`--send-plain`, `--send-merged`, `--send-annotated-only`) to do the upload
+and tag-update work. `send-to-zotero` exports/trims markup locally with the
+bundled `zotbridge-localgeta` binary and uploads over WebDAV — it never
+contacts reMarkable Cloud.
+
+```sh
+cp xovi/3.28/zoteroSendToZotero.qmd \
+  /home/root/xovi/exthome/qt-resource-rebuilder/
+```
+
+`.\scripts\update-remarkable.ps1` installs this file automatically alongside
+the other two 3.28 QMD patches, and copies its glyph icon
+(`xovi/assets/zotero-send-icon.png`, a plain "Z" glyph, not a native firmware
+icon resource) to `/home/root/xovi-zotero-bridge/assets/`.
+
+This patch has **not** been validated on-device yet. Its toolbar/menu insertion
+points and native property tokens are copied from the community-published
+`touchLock.qmd` (matching this firmware build), but the button and dialog
+behavior themselves are new and should be tested carefully — ideally with a way
+to revert (remove the file and restart XOVI) if the reader toolbar or menus
+misbehave.
+
 The displayed Quick Settings icon is a circular **Z** badge. It inverts while the operation runs,
 and cannot be tapped again during that time. Xochitl's logging feedback reports
 start, completion counts, partial failure counts, launch failure, or invalid output.
@@ -74,13 +126,10 @@ Restart XOVI afterward to load the QMD changes and AppLoad's app list.
 
 The 3.28 Settings app sidebar gains **Zotero Bridge**. It edits the WebDAV URL,
 username, password replacement, default reMarkable folder, and queue/completion
-tags. It also reports whether the bundled rmapi is paired with reMarkable Cloud
-and accepts the eight-character code generated at
-`my.remarkable.com/device/browser/connect`. Pairing uses a short-lived private
-draft; the code field is cleared immediately, and neither the code nor cloud
-tokens are returned to QML or recorded in the activity log. The pairing status is
-shown independently. **Pair** creates the first pairing; **Re-pair** safely
-replaces an existing token only after the new cloud credentials are verified.
+tags. There is no reMarkable Cloud pairing step: reverse synchronization reads
+directly from the on-device xochitl library and merges annotations locally with
+the bundled `zotbridge-localgeta` binary, so no cloud account or one-time code
+is ever needed.
 The **reMarkable source folder** setting defaults to `Zotero/Read` and will be
 used by reverse synchronization.
 

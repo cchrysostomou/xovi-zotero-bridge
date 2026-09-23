@@ -17,6 +17,8 @@ default_target_folder = "Zotero/unread"
 reverse_sync_folder = "Zotero/Read"
 sync_queue_tag = "to_sync"
 sync_synced_tag = "synced"
+# Papers listed per page in the AppLoad library view (Settings can override this, 1-100).
+list_page_limit = 8
 state_db_path = "./zotbridge-state.db"
 # Bridge-owned JSON state and tag cache; separate from Python's legacy SQLite import database.
 # Tags are cached until an explicit `tags --refresh`; each library/query has its own entry.

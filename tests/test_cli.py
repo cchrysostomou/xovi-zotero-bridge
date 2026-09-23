@@ -11,7 +11,7 @@ from typer.testing import CliRunner
 
 from zotbridge.cli import app
 from zotbridge.state import StateStore
-from zotbridge.zotero_client import LibraryPage, Paper
+from zotbridge.zotero_client import Attachment, Collection, LibraryPage, Paper
 
 
 class CliTests(unittest.TestCase):
@@ -39,6 +39,15 @@ class CliTests(unittest.TestCase):
         finally:
             path.unlink()
 
+    @contextmanager
+    def download_attachment(self, item_key, attachment_key):
+        path = self.root / "document.pdf"
+        path.write_bytes(b"%PDF-1.7\n")
+        try:
+            yield path, attachment_key
+        finally:
+            path.unlink()
+
     def test_import_records_mapping_and_repeated_import_does_no_work(self):
         with patch("zotbridge.cli.ZoteroBridge") as zotero, patch("zotbridge.cli.LibrarianBridge") as librarian:
             zotero.return_value.download_first_pdf.side_effect = self.download
@@ -53,6 +62,30 @@ class CliTests(unittest.TestCase):
             librarian.return_value.import_document.assert_called_once()
             zotero.assert_called_once()
         self.assertFalse((self.root / "document.pdf").exists())
+
+    def test_import_with_attachment_key_downloads_that_specific_attachment(self):
+        with patch("zotbridge.cli.ZoteroBridge") as zotero, patch("zotbridge.cli.LibrarianBridge") as librarian:
+            zotero.return_value.download_attachment.side_effect = self.download_attachment
+            librarian.return_value.ensure_folder.return_value = "folder-uuid"
+            librarian.return_value.import_document.return_value = "document-uuid"
+            result = self.runner.invoke(
+                app, ["import", "--item-key", "ITEM1234", "--attachment-key", "PDF12345"]
+            )
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertEqual(json.loads(result.output)["attachment_key"], "PDF12345")
+            zotero.return_value.download_attachment.assert_called_once_with("ITEM1234", "PDF12345")
+            zotero.return_value.download_first_pdf.assert_not_called()
+
+    def test_children_lists_downloadable_pdf_attachments(self):
+        with patch("zotbridge.cli.ZoteroBridge") as zotero:
+            zotero.return_value.list_pdf_attachments.return_value = [
+                Attachment(attachment_key="PDF12345", title="Paper.pdf"),
+            ]
+            result = self.runner.invoke(app, ["children", "--item-key", "ITEM1234", "--json"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["attachments"], [{"attachment_key": "PDF12345", "title": "Paper.pdf"}])
 
     def test_timeout_keeps_uncertain_attempt_and_blocks_automatic_retry(self):
         with patch("zotbridge.cli.ZoteroBridge") as zotero, patch("zotbridge.cli.LibrarianBridge") as librarian:
@@ -170,7 +203,7 @@ class CliTests(unittest.TestCase):
     def test_filtered_page_api_and_array_compatibility(self):
         with patch("zotbridge.cli.ZoteroBridge") as zotero:
             zotero.return_value.search_page.return_value = LibraryPage(
-                [Paper("ITEM1234", "Paper", "2024", True)], 5, 5, 6, None
+                [Paper("ITEM1234", "Paper", "2024", True, 1)], 5, 5, 6, None
             )
             result = self.runner.invoke(app, [
                 "list", "--tag", "one", "--tag", "two", "--skip", "5", "--limit", "5", "--page-info",
@@ -181,10 +214,55 @@ class CliTests(unittest.TestCase):
                 "skip": 5, "limit": 5, "total": 6, "has_more": False, "next_skip": None,
             })
             zotero.return_value.search_page.assert_called_once_with(
-                "", limit=5, skip=5, tags=["one", "two"]
+                "", limit=5, skip=5, tags=["one", "two"], collection=None
             )
             legacy = self.runner.invoke(app, ["list", "--json"])
             self.assertIsInstance(json.loads(legacy.output), list)
+            self.assertEqual(json.loads(legacy.output)[0]["num_children"], 1)
+
+    def test_list_plain_text_shows_estimated_file_item_count_not_pdf_marker(self):
+        with patch("zotbridge.cli.ZoteroBridge") as zotero:
+            zotero.return_value.search_page.return_value = LibraryPage(
+                [Paper("ITEM1234", "Paper", "2024", True, 3)], 0, 5, 1, None
+            )
+            result = self.runner.invoke(app, ["list"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertIn("files~3", result.output)
+            self.assertNotIn("PDF", result.output)
+
+    def test_list_default_limit_comes_from_config_and_collection_is_forwarded(self):
+        with patch("zotbridge.cli.ZoteroBridge") as zotero:
+            zotero.return_value.search_page.return_value = LibraryPage([], 0, 8, 0, None)
+            result = self.runner.invoke(app, ["list", "--collection", "COLLECTA", "--json"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            zotero.return_value.search_page.assert_called_once_with(
+                "", limit=8, skip=0, tags=None, collection="COLLECTA"
+            )
+
+    def test_invalid_collection_key_never_contacts_zotero(self):
+        with patch("zotbridge.cli.ZoteroBridge") as zotero:
+            result = self.runner.invoke(app, ["list", "--collection", "bad-key"])
+        self.assertEqual(result.exit_code, 1)
+        self.assertEqual(json.loads(result.output)["error"], "ValueError")
+        zotero.assert_not_called()
+
+    def test_collection_discovery_json(self):
+        with patch("zotbridge.cli.ZoteroBridge") as zotero:
+            zotero.return_value.list_collections.return_value = [
+                Collection("COLLECTA", "Papers"), Collection("COLLECTB", "Notes"),
+            ]
+            result = self.runner.invoke(app, ["collections", "--json"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertEqual(json.loads(result.output), [
+                {"key": "COLLECTA", "name": "Papers"}, {"key": "COLLECTB", "name": "Notes"},
+            ])
+            cached = self.runner.invoke(app, ["collections", "--json"])
+            self.assertEqual(json.loads(cached.output), json.loads(result.output))
+            zotero.return_value.list_collections.assert_called_once()
+            zotero.return_value.list_collections.return_value = [Collection("COLLECTC", "Fresh")]
+            refreshed = self.runner.invoke(app, ["collections", "--refresh", "--json"])
+            self.assertEqual(refreshed.exit_code, 0, refreshed.output)
+            self.assertEqual(json.loads(refreshed.output), [{"key": "COLLECTC", "name": "Fresh"}])
 
     def test_tag_discovery_json(self):
         with patch("zotbridge.cli.ZoteroBridge") as zotero:

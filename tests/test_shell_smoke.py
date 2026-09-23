@@ -53,17 +53,33 @@ path = urlsplit(url).path
 parameters = parse_qs(urlsplit(url).query)
 start = int(parameters.get("start", ["0"])[0])
 limit = int(parameters.get("limit", ["100"])[0])
-data = {"key":"ITEM1234","data":{"key":"ITEM1234","itemType":"journalArticle","title":"Test Paper","date":"2024"}}
+data = {"key":"ITEM1234","data":{"key":"ITEM1234","itemType":"journalArticle","title":"Test Paper","date":"2024",
+    "tags":[{"tag":"important"}]}}
 attachment = {"key":"HOSTED12","data":{"key":"HOSTED12","itemType":"attachment",
     "parentItem":"ITEM1234","contentType":"application/pdf","linkMode":"imported_file","filename":"Paper.pdf"}}
 status = "200"
 total = 1
-if path.endswith("/items/top"):
-    total = int(os.environ.get("FAKE_ITEM_TOTAL", "1"))
+if re.search(r"/collections/[A-Z0-9]{8}/items/top$", path):
+    total = int(os.environ.get("FAKE_COLLECTION_ITEM_TOTAL", "1"))
     items = []
     for i in range(start, min(start + limit, total)):
         key = "ITEM1234" if i == 0 else f"ITEM{i:04}"
-        items.append({"key":key,"data":dict(data["data"],key=key)})
+        items.append({"key":key,"data":dict(data["data"],key=key),"meta":{"numChildren":1}})
+    body = json.dumps(items).encode()
+elif path.endswith("/collections/top"):
+    total = int(os.environ.get("FAKE_COLLECTION_TOTAL", "2"))
+    prefix = os.environ.get("FAKE_COLLECTION_PREFIX", "Folder")
+    collections = [{"key":f"COL{i:05d}","data":{"key":f"COL{i:05d}","name":f"{prefix} {i}"}}
+                   for i in range(start, min(start + limit, total))]
+    if start >= int(os.environ.get("FAKE_COLLECTION_FAILURE_START", "999999")): status = "500"
+    body = json.dumps(collections).encode()
+elif path.endswith("/items/top"):
+    total = int(os.environ.get("FAKE_ITEM_TOTAL", "1"))
+    num_children = int(os.environ.get("FAKE_ITEM_NUM_CHILDREN", "1"))
+    items = []
+    for i in range(start, min(start + limit, total)):
+        key = "ITEM1234" if i == 0 else f"ITEM{i:04}"
+        items.append({"key":key,"data":dict(data["data"],key=key),"meta":{"numChildren":num_children}})
     body = json.dumps(items).encode()
 elif re.search(r"/items/ITEM[A-Z0-9]{4}/children$", path):
     body = json.dumps([attachment]).encode()
@@ -99,28 +115,6 @@ else:
 if "write-out" in options:
     sys.stdout.write(options["write-out"].replace("%{http_code}",status).replace("\\n","\n"))
 '''
-
-FAKE_RMAPI = r'''#!/bin/sh
-config="${RMAPI_CONFIG:?}"
-if [ "$1" = "-ni" ] && [ "$2" = "-code" ]; then
-    [ "${FAKE_RMAPI_PAIR_FAIL:-0}" != "1" ] || exit 1
-    printf '{"devicetoken":"device-secret","usertoken":"user-secret"}\n' > "$config"
-    exit 0
-fi
-if { [ "$1" = "-json" ] && [ "$2" = "ls" ]; } || [ "$1" = "ls" ]; then
-    if [ ! -s "$config" ]; then
-        read code
-        [ "${FAKE_RMAPI_PAIR_FAIL:-0}" != "1" ] || exit 1
-        [ "${#code}" = "8" ] || exit 1
-        printf '{"devicetoken":"device-secret","usertoken":"user-secret"}\n' > "$config"
-    fi
-    [ "${FAKE_RMAPI_VERIFY_FAIL:-0}" != "1" ] || exit 1
-    printf '[]\n'
-    exit 0
-fi
-exit 2
-'''
-
 
 @unittest.skipUnless(os.name == "posix" and JQ and shutil.which("unzip"),
                      "Shell smoke tests require Linux, jq and unzip")
@@ -160,10 +154,7 @@ class ShellSmokeTests(unittest.TestCase):
         self.env = dict(os.environ, PATH=str(self.bin), ZOTBRIDGE_JQ=str(JQ),
                         ZOTBRIDGE_CURL=str(self.curl), ZOTBRIDGE_CONFIG=str(self.config),
                         ZOTBRIDGE_BACKEND="shell", FAKE_ARCHIVE=str(self.archive),
-                        FAKE_REQUESTS=str(self.requests), ZOTBRIDGE_WORK_DIR=str(self.root),
-                        ZOTBRIDGE_RMAPI_CONFIG=str(self.root / ".rmapi"),
-                        ZOTBRIDGE_RMAPI_PAIR_DRAFT=str(
-                            self.root / ".zotbridge-rmapi-pair-draft.json"))
+                        FAKE_REQUESTS=str(self.requests), ZOTBRIDGE_WORK_DIR=str(self.root))
 
     def run_cli(self, *arguments):
         return subprocess.run([str(self.bin / "sh"), str(ROOT / "scripts" / "zotbridge-run.sh"),
@@ -254,11 +245,12 @@ class ShellSmokeTests(unittest.TestCase):
         self.assertNotIn("password-secret", settings.stdout)
         self.assertEqual(public["sync_queue_tag"], "to_sync")
         self.assertEqual(public["reverse_sync_folder"], "Zotero/Read")
-        self.assertEqual(public["rmapi"], {"installed": False, "paired": False})
+        self.assertEqual(public["list_page_limit"], 8)
         draft = self.root / ".zotbridge-settings-draft.json"
         draft.write_text(json.dumps({
             "version": 1, "webdav_url": "https://next.example/files",
             "webdav_username": "next-user", "default_target_folder": "Zotero/ready",
+            "list_page_limit": 25,
             "reverse_sync_folder": "Zotero/Read and annotated",
             "sync_queue_tag": "waiting", "sync_synced_tag": "complete",
         }))
@@ -268,6 +260,7 @@ class ShellSmokeTests(unittest.TestCase):
         self.assertTrue(data["applied"])
         self.assertEqual(data["webdav"]["url"], "https://next.example/files/")
         self.assertTrue(data["webdav"]["password_set"])
+        self.assertEqual(data["list_page_limit"], 25)
         self.assertFalse(draft.exists())
         saved = self.config.read_text()
         self.assertIn('webdav_password = "password-secret"', saved)
@@ -275,99 +268,36 @@ class ShellSmokeTests(unittest.TestCase):
         self.assertIn('reverse_sync_folder = "Zotero/Read and annotated"', saved)
         self.assertNotIn("password-secret", applied.stdout)
 
-    def install_fake_rmapi(self):
-        rmapi = self.bin / "rmapi"
-        rmapi.write_text(FAKE_RMAPI)
-        rmapi.chmod(0o755)
-        self.env["ZOTBRIDGE_RMAPI"] = str(rmapi)
-        return rmapi
-
-    def test_rmapi_status_distinguishes_unavailable_unpaired_and_paired(self):
-        unavailable = self.run_cli("rmapi-status")
-        self.assertEqual(unavailable.returncode, 0, unavailable.stdout + unavailable.stderr)
-        self.assertEqual(json.loads(unavailable.stdout)["rmapi"],
-                         {"installed": False, "paired": False})
-
-        self.install_fake_rmapi()
-        unpaired = self.run_cli("rmapi-status")
-        self.assertEqual(json.loads(unpaired.stdout)["rmapi"],
-                         {"installed": True, "paired": False})
-
-        (self.root / ".rmapi").write_text('{"usertoken":"secret"}\n')
-        paired = self.run_cli("rmapi-status")
-        self.assertEqual(json.loads(paired.stdout)["rmapi"],
-                         {"installed": True, "paired": True})
-        settings = json.loads(self.run_cli("settings", "--json").stdout)
-        self.assertEqual(settings["rmapi"], {"installed": True, "paired": True})
-        self.assertNotIn("secret", json.dumps(settings))
-
-    def test_rmapi_pair_validates_verifies_and_installs_token_without_leaking_code(self):
-        self.install_fake_rmapi()
-        code = "A1B2C3D4"
-        draft = self.root / ".zotbridge-rmapi-pair-draft.json"
-        draft.write_text(json.dumps({"version": 1, "code": code}))
-        result = self.run_cli("rmapi-pair")
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(json.loads(result.stdout)["rmapi"],
-                         {"installed": True, "paired": True})
-        self.assertFalse(draft.exists())
-        token = self.root / ".rmapi"
-        self.assertTrue(token.exists())
-        self.assertEqual(token.stat().st_mode & 0o777, 0o600)
-        self.assertNotIn(code, result.stdout + result.stderr)
-        self.assertNotIn(code, (self.root / "state.db.json.activity.jsonl").read_text())
-
-    def test_rmapi_pair_rejects_invalid_code_and_removes_draft(self):
-        self.install_fake_rmapi()
-        draft = self.root / ".zotbridge-rmapi-pair-draft.json"
-        draft.write_text(json.dumps({"version": 1, "code": "bad"}))
-        result = self.run_cli("rmapi-pair")
+    def test_reverse_sync_reports_broker_unavailable_instead_of_silent_failure(self):
+        # Regression test: reverse-sync used to redirect its stdout to a WORK file
+        # that was deleted before an internal fail() (e.g. broker unreachable) could
+        # ever be printed, so the command exited nonzero with completely empty
+        # stdout/stderr. It must now surface the JSON error normally.
+        self.install_stub_localgeta_and_seven_zip()
+        with self.config.open("a") as config:
+            config.write('reverse_sync_folder = "Zotero"\n')
+        result = self.run_cli("reverse-sync")
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(json.loads(result.stdout)["error"], "rmapi_pair_error")
-        self.assertFalse(draft.exists())
-        self.assertFalse((self.root / ".rmapi").exists())
+        self.assertTrue(result.stdout.strip(), "reverse-sync must not fail silently")
+        data = json.loads(result.stdout)
+        self.assertEqual(data["ok"], False)
+        self.assertEqual(data["error"], "ValueError")
+        self.assertIn("FIFOs", data["message"])
 
-    def test_rmapi_pair_failure_is_atomic_and_refuses_existing_pairing(self):
-        self.install_fake_rmapi()
-        draft = self.root / ".zotbridge-rmapi-pair-draft.json"
-        draft.write_text(json.dumps({"version": 1, "code": "A1B2C3D4"}))
-        self.env["FAKE_RMAPI_VERIFY_FAIL"] = "1"
-        failed = self.run_cli("rmapi-pair")
-        self.assertNotEqual(failed.returncode, 0)
-        self.assertEqual(json.loads(failed.stdout)["error"], "rmapi_pair_error")
-        self.assertFalse(draft.exists())
-        self.assertFalse((self.root / ".rmapi").exists())
-        self.assertFalse(list(self.root.glob(".rmapi.candidate.*")))
-
-        self.env.pop("FAKE_RMAPI_VERIFY_FAIL")
-        token = self.root / ".rmapi"
-        token.write_text('{"usertoken":"existing-secret"}\n')
-        draft.write_text(json.dumps({"version": 1, "code": "Z9Y8X7W6"}))
-        refused = self.run_cli("rmapi-pair")
-        self.assertNotEqual(refused.returncode, 0)
-        self.assertEqual(token.read_text(), '{"usertoken":"existing-secret"}\n')
-        self.assertFalse(draft.exists())
-        self.assertNotIn("Z9Y8X7W6", refused.stdout + refused.stderr)
-
-    def test_rmapi_repair_preserves_existing_token_on_failure_then_replaces_it(self):
-        self.install_fake_rmapi()
-        token = self.root / ".rmapi"
-        token.write_text('{"usertoken":"existing-secret"}\n')
-        draft = self.root / ".zotbridge-rmapi-pair-draft.json"
-        draft.write_text(json.dumps({"version": 1, "code": "A1B2C3D4"}))
-        self.env["FAKE_RMAPI_VERIFY_FAIL"] = "1"
-        failed = self.run_cli("rmapi-repair")
-        self.assertNotEqual(failed.returncode, 0)
-        self.assertEqual(token.read_text(), '{"usertoken":"existing-secret"}\n')
-        self.assertFalse(draft.exists())
-
-        self.env.pop("FAKE_RMAPI_VERIFY_FAIL")
-        draft.write_text(json.dumps({"version": 1, "code": "A1B2C3D4"}))
-        repaired = self.run_cli("rmapi-repair")
-        self.assertEqual(repaired.returncode, 0, repaired.stdout + repaired.stderr)
-        self.assertIn("device-secret", token.read_text())
-        self.assertNotIn("existing-secret", token.read_text())
-        self.assertEqual(token.stat().st_mode & 0o777, 0o600)
+    def test_sync_all_reports_broker_unavailable_instead_of_silent_failure(self):
+        # Regression test for the same silent-failure pattern inside sync_all()'s
+        # internal reverse_sync call.
+        self.install_stub_localgeta_and_seven_zip()
+        with self.config.open("a") as config:
+            config.write('reverse_sync_folder = "Zotero"\ndefault_target_folder = "Zotero"\n'
+                         'sync_queue_tag = "waiting"\nsync_synced_tag = "complete"\n')
+        result = self.run_cli("sync-all")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(result.stdout.strip(), "sync-all must not fail silently")
+        data = json.loads(result.stdout)
+        self.assertEqual(data["ok"], False)
+        self.assertEqual(data["reverse"]["error"], "ValueError")
+        self.assertIn("FIFOs", data["reverse"]["message"])
 
     def test_reverse_sync_retains_unexportable_document_and_logs_stage(self):
         self.prepare_import()
@@ -376,21 +306,14 @@ class ShellSmokeTests(unittest.TestCase):
             "type": "DocumentType", "parent": self.folder.decode(),
             "visibleName": "Unsupported EPUB",
         }))
-        rmapi = self.bin / "rmapi"
-        rmapi.write_text(
-            "#!/bin/sh\n"
-            "if [ \"$1\" = \"-json\" ]; then "
-            f"printf '[{{\"id\":\"{uuid}\",\"name\":\"Unsupported EPUB\","
-            "\"type\":\"DocumentType\"}]\\n'; exit 0; fi\n"
-            "exit 1\n"
-        )
-        rmapi.chmod(0o755)
+        local_geta = self.bin / "zotbridge-localgeta"
+        local_geta.write_text("#!/bin/sh\nexit 1\n")
+        local_geta.chmod(0o755)
         seven_zip = self.bin / "7zz"
         seven_zip.write_text("#!/bin/sh\nexit 1\n")
         seven_zip.chmod(0o755)
-        self.env["ZOTBRIDGE_RMAPI"] = str(rmapi)
+        self.env["ZOTBRIDGE_LOCALGETA"] = str(local_geta)
         self.env["ZOTBRIDGE_7ZZ"] = str(seven_zip)
-        (self.root / ".rmapi").write_text('{"usertoken":"secret"}\n')
         with self.broker_reply([self.folder]):
             result = self.run_cli("reverse-sync")
         self.assertNotEqual(result.returncode, 0)
@@ -440,8 +363,26 @@ class ShellSmokeTests(unittest.TestCase):
         data = json.loads(result.stdout)
         self.assertEqual(data[0]["item_key"], "ITEM1234")
         self.assertTrue(data[0]["has_pdf"])
+        self.assertEqual(data[0]["num_children"], 1)
         self.assertIsNone(data[0]["mapping"])
         self.assertIsNone(data[0]["attempt"])
+
+    def test_has_pdf_uses_numchildren_without_a_children_request(self):
+        result = self.run_cli("list", "--limit", "5", "--json")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        requests = [json.loads(line) for line in self.requests.read_text().splitlines()]
+        self.assertFalse(any(request["path"].endswith("/children") for request in requests))
+        self.env["FAKE_ITEM_NUM_CHILDREN"] = "0"
+        result = self.run_cli("list", "--limit", "5", "--json")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(json.loads(result.stdout)[0]["has_pdf"])
+        self.assertEqual(json.loads(result.stdout)[0]["num_children"], 0)
+
+    def test_list_plain_text_shows_estimated_file_item_count_not_pdf_marker(self):
+        result = self.run_cli("list", "--limit", "5")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("files~1", result.stdout)
+        self.assertNotIn("PDF", result.stdout)
 
     def test_list_needs_no_unzip_head_stat_or_broker_tools(self):
         for tool in ("unzip", "head", "stat", "od", "flock", "mv", "sleep"):
@@ -476,6 +417,36 @@ class ShellSmokeTests(unittest.TestCase):
                 requests = [json.loads(line) for line in self.requests.read_text().splitlines()]
                 request = [r for r in requests if r["path"].endswith("/items/top")][-1]
                 self.assertEqual(parse_qs(request["query"])["tag"], [expression])
+
+    def test_default_list_limit_comes_from_config_and_collection_filters_endpoint(self):
+        from urllib.parse import parse_qs
+        result = self.run_cli("list", "--json")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        request = json.loads(self.requests.read_text().splitlines()[-1])
+        self.assertEqual(request["path"], "/users/123/items/top")
+        self.assertEqual(parse_qs(request["query"])["limit"], ["8"])
+        self.config.write_text(self.config.read_text() + 'list_page_limit = 42\n')
+        result = self.run_cli("list", "--json")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        request = json.loads(self.requests.read_text().splitlines()[-1])
+        self.assertEqual(parse_qs(request["query"])["limit"], ["42"])
+        override = self.run_cli("list", "--limit", "3", "--json")
+        self.assertEqual(override.returncode, 0, override.stdout + override.stderr)
+        request = json.loads(self.requests.read_text().splitlines()[-1])
+        self.assertEqual(parse_qs(request["query"])["limit"], ["3"])
+        collection = self.run_cli("list", "--collection", "COLLECTA", "--json")
+        self.assertEqual(collection.returncode, 0, collection.stdout + collection.stderr)
+        requests = [json.loads(line) for line in self.requests.read_text().splitlines()]
+        self.assertEqual(requests[-1]["path"], "/users/123/collections/COLLECTA/items/top")
+        invalid = self.run_cli("list", "--collection", "bad-key")
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertEqual(json.loads(invalid.stdout)["error"], "ValueError")
+
+    def test_invalid_list_page_limit_configuration_is_rejected(self):
+        self.config.write_text(self.config.read_text() + 'list_page_limit = 0\n')
+        result = self.run_cli("list", "--json")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(json.loads(result.stdout)["error"], "configuration_error")
 
     def test_pages_advance_then_end_and_keep_filtered_total(self):
         self.env["FAKE_ITEM_TOTAL"] = "3"
@@ -636,6 +607,51 @@ class ShellSmokeTests(unittest.TestCase):
             self.fail("Python must read the shell cache without fetching")
         self.assertEqual(store.tags("user:123", "", unexpected_fetch), json.loads(refreshed.stdout))
 
+    def test_collections_fetch_and_cache_across_pages(self):
+        self.env["FAKE_COLLECTION_TOTAL"] = "150"
+        result = self.run_cli("collections", "--json")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        names = json.loads(result.stdout)
+        self.assertEqual(len(names), 150)
+        self.assertEqual(names[0], {"key": "COL00000", "name": "Folder 0"})
+        requests = [json.loads(line) for line in self.requests.read_text().splitlines()]
+        self.assertEqual(len(requests), 2)
+        original = self.requests.read_bytes()
+        self.env["FAKE_METADATA_STATUS"] = "401"
+        cached = self.run_cli("collections", "--json")
+        self.assertEqual(cached.returncode, 0, cached.stdout + cached.stderr)
+        self.assertEqual(json.loads(cached.stdout), names)
+        self.assertEqual(self.requests.read_bytes(), original)
+        del self.env["FAKE_METADATA_STATUS"]
+        self.env["FAKE_COLLECTION_PREFIX"] = "Fresh"
+        refreshed = self.run_cli("collections", "--refresh", "--json")
+        self.assertEqual(refreshed.returncode, 0, refreshed.stdout + refreshed.stderr)
+        self.assertEqual(json.loads(refreshed.stdout)[0], {"key": "COL00000", "name": "Fresh 0"})
+        stored = json.loads((self.root / "state.db.json").read_text())
+        self.assertEqual(stored["collection_cache"]["user:123"]["collections"], json.loads(refreshed.stdout))
+
+    def test_collection_cache_corruption_is_not_silently_reset(self):
+        state = self.root / "state.db.json"
+        for contents in ('{"version":1,"mappings":{},"attempts":{},"collection_cache":{"user:123":1}}',
+                         '{"version":1,"mappings":{},"attempts":{},"collection_cache":null}'):
+            with self.subTest(contents=contents):
+                state.write_text(contents)
+                result = self.run_cli("collections", "--refresh", "--json")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(json.loads(result.stdout)["error"], "state_error")
+                self.assertEqual(state.read_text(), contents)
+        self.assertFalse(self.requests.exists())
+
+    def test_python_and_shell_share_the_same_collection_cache(self):
+        from zotbridge.json_state import JsonStateStore
+        store = JsonStateStore(str(self.root / "state.db.json"))
+        store.collections("user:123", lambda: [{"key": "COLLECTA", "name": "Papers"}])
+        self.env["FAKE_METADATA_STATUS"] = "401"
+        result = self.run_cli("collections", "--json")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout), [{"key": "COLLECTA", "name": "Papers"}])
+        self.assertFalse(self.requests.exists())
+
     def test_invalid_offsets_and_tag_expressions(self):
         for args in (("list", "--skip", "-1"), ("list", "--skip", "2147483648"),
                      ("list", "--tag", ""), ("list", "--tag", "one||two")):
@@ -705,6 +721,7 @@ class ShellSmokeTests(unittest.TestCase):
             "ok": True, "library_type": "user", "library_id": "123", "cleared": 1,
         })
         del original["mappings"]["e90be5e8-32f6-46ec-bb75-32d827af9eee"]
+        original["collection_cache"] = {}
         self.assertEqual(json.loads(state.read_text()), original)
         self.assertEqual(document.read_bytes(), b"%PDF-1.7\n")
         unchanged = state.read_bytes()
@@ -944,6 +961,60 @@ class ShellSmokeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(requests[0], b">eensureFolder:Manual/inbox\n")
 
+    def test_children_lists_only_downloadable_pdf_attachments(self):
+        result = self.run_cli("children", "--item-key", "ITEM1234", "--json")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(result.stdout)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["item_key"], "ITEM1234")
+        self.assertEqual(data["attachments"], [{"attachment_key": "HOSTED12", "title": "Paper.pdf"}])
+
+    def test_import_with_explicit_attachment_key_and_selected_tags(self):
+        self.prepare_import()
+        with self.config.open("a") as config:
+            config.write('default_target_folder = "Research/unread"\n')
+
+        def on_request(request):
+            self.simulate_import(request)
+            if request.startswith(b">esetTags:"):
+                payload = request.decode().strip().split(":", 1)[1]
+                _, tags_csv = payload.split(",", 1)
+                path = self.library / f"{self.document.decode()}.metadata"
+                metadata = json.loads(path.read_text())
+                metadata["tags"] = tags_csv.split(";")
+                path.write_text(json.dumps(metadata))
+
+        with self.broker_reply([self.folder, self.document, b"ok"], on_request) as requests:
+            result = self.run_cli(
+                "import", "--item-key", "ITEM1234", "--attachment-key", "HOSTED12",
+                "--include-zotero-tags", "--add-unread-tag",
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data["attachment_key"], "HOSTED12")
+        self.assertTrue(data["remarkable_tags_updated"])
+        self.assertEqual(len(requests), 3)
+        self.assertTrue(requests[2].startswith(b">esetTags:" + self.document))
+        tags = requests[2].decode().strip().split(",", 1)[1].split(";")
+        self.assertEqual(set(tags), {"important", "unread"})
+
+    def test_import_without_tag_flags_does_not_call_settags(self):
+        self.prepare_import()
+        with self.config.open("a") as config:
+            config.write('default_target_folder = "Research/unread"\n')
+        with self.broker_reply([self.folder, self.document], self.simulate_import) as requests:
+            result = self.run_cli("import", "--item-key", "ITEM1234", "--attachment-key", "HOSTED12")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(result.stdout)
+        self.assertFalse(data["remarkable_tags_updated"])
+        self.assertEqual(len(requests), 2)
+
+    def test_import_rejects_attachment_key_not_belonging_to_item(self):
+        self.prepare_import()
+        result = self.run_cli("import", "--item-key", "ITEM1234", "--attachment-key", "BADKEY99")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(json.loads(result.stdout)["error"], "zotero_error")
+
     def test_unconfirmed_import_blocks_repeat_and_reports_status(self):
         self.prepare_import()
         with self.broker_reply([self.folder, None], self.simulate_import):
@@ -1056,6 +1127,274 @@ class ShellSmokeTests(unittest.TestCase):
         corrupt = self.run_cli("check-connection", "--item-key", "ITEM1234")
         self.assertNotEqual(corrupt.returncode, 0)
         self.assertEqual(json.loads(corrupt.stdout)["error"], "archive_error")
+
+    def setup_library_document(self, uuid, name="Test Paper", parent="", tags=None, deleted=False):
+        self.library = self.root / "library"
+        self.library.mkdir(exist_ok=True)
+        if "xochitl_dir" not in self.config.read_text():
+            with self.config.open("a") as config:
+                config.write(f'xochitl_dir = "{self.library}"\n')
+        metadata = {"type": "DocumentType", "parent": parent, "visibleName": name,
+                    "deleted": deleted}
+        if tags is not None:
+            metadata["tags"] = tags
+        (self.library / f"{uuid}.metadata").write_text(json.dumps(metadata))
+
+    def install_stub_localgeta_and_seven_zip(self):
+        local_geta = self.bin / "zotbridge-localgeta"
+        local_geta.write_text("#!/bin/sh\nexit 1\n")
+        local_geta.chmod(0o755)
+        self.env["ZOTBRIDGE_LOCALGETA"] = str(local_geta)
+        seven_zip = self.bin / "7zz"
+        seven_zip.write_text("#!/bin/sh\nexit 1\n")
+        seven_zip.chmod(0o755)
+        self.env["ZOTBRIDGE_7ZZ"] = str(seven_zip)
+
+    def test_doc_status_reports_unmapped_document(self):
+        uuid = "cc4c1d9d-a04a-4f6e-bb08-d6f54cde88b8"
+        result = self.run_cli("doc-status", "--uuid", uuid)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"ok": True, "rm_uuid": uuid, "mapped": False})
+
+    def test_doc_status_reports_mapped_document_with_zotero_title(self):
+        uuid = "cc4c1d9d-a04a-4f6e-bb08-d6f54cde88b8"
+        state = self.root / "state.db.json"
+        state.write_text(json.dumps({
+            "version": 1, "mappings": {uuid: {
+                "zotero_library_type": "user", "zotero_library_id": "123",
+                "zotero_item_key": "ITEM1234", "zotero_attachment_key": "HOSTED12",
+                "rm_path": "Research/unread", "updated_at": "2026-01-01 00:00:00"}},
+            "attempts": {}, "tag_cache": {}, "collection_cache": {}}))
+        result = self.run_cli("doc-status", "--uuid", uuid)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(result.stdout)
+        self.assertTrue(data["mapped"])
+        self.assertEqual(data["zotero_item_key"], "ITEM1234")
+        self.assertEqual(data["zotero_attachment_key"], "HOSTED12")
+        self.assertEqual(data["zotero_item_title"], "Test Paper")
+
+    def test_doc_status_rejects_invalid_uuid(self):
+        result = self.run_cli("doc-status", "--uuid", "not-a-uuid")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(json.loads(result.stdout)["error"], "ValueError")
+
+    def test_doc_tags_reads_remarkable_metadata_tags(self):
+        uuid = "cc4c1d9d-a04a-4f6e-bb08-d6f54cde88b8"
+        self.setup_library_document(uuid, tags=["important", "unread"])
+        result = self.run_cli("doc-tags", "--uuid", uuid)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data["ok"], True)
+        self.assertEqual(data["rm_uuid"], uuid)
+        self.assertEqual(sorted(data["tags"]), ["important", "unread"])
+
+    def test_doc_tags_rejects_missing_or_deleted_document(self):
+        uuid = "cc4c1d9d-a04a-4f6e-bb08-d6f54cde88b8"
+        self.library = self.root / "library"
+        self.library.mkdir()
+        with self.config.open("a") as config:
+            config.write(f'xochitl_dir = "{self.library}"\n')
+        missing = self.run_cli("doc-tags", "--uuid", uuid)
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertEqual(json.loads(missing.stdout)["error"], "FileNotFoundError")
+        self.setup_library_document(uuid, deleted=True)
+        deleted = self.run_cli("doc-tags", "--uuid", uuid)
+        self.assertNotEqual(deleted.returncode, 0)
+        self.assertEqual(json.loads(deleted.stdout)["error"], "FileNotFoundError")
+
+    def test_queue_for_zotero_validates_mode_and_related_options(self):
+        uuid = "cc4c1d9d-a04a-4f6e-bb08-d6f54cde88b8"
+        cases = [
+            (["--uuid", uuid, "--mode", "bogus"], "ValueError"),
+            (["--uuid", uuid, "--mode", "attach"], "ValueError"),
+            (["--uuid", uuid, "--mode", "new", "--parent-key", "ITEM1234"], "ValueError"),
+            (["--uuid", uuid, "--mode", "attach", "--parent-key", "ITEM1234",
+              "--collection", "COLL1234"], "ValueError"),
+            (["--uuid", uuid, "--mode", "new", "--tags", "bad,tag,"], "ValueError"),
+            (["--uuid", "not-a-uuid", "--mode", "new"], "ValueError"),
+        ]
+        for args, expected_error in cases:
+            with self.subTest(args=args):
+                result = self.run_cli("queue-for-zotero", *args)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(json.loads(result.stdout)["error"], expected_error)
+
+    def test_queue_for_zotero_reports_missing_config_then_missing_document(self):
+        uuid = "cc4c1d9d-a04a-4f6e-bb08-d6f54cde88b8"
+        # queue-for-zotero never touches localgeta/7z (no export happens), so the
+        # first failure without a configured reverse_sync_folder is a plain
+        # ValueError from validate_target_folder, not missing_dependency.
+        missing_folder = self.run_cli("queue-for-zotero", "--uuid", uuid, "--mode", "new")
+        self.assertNotEqual(missing_folder.returncode, 0)
+        self.assertEqual(json.loads(missing_folder.stdout)["error"], "ValueError")
+        self.library = self.root / "library"
+        self.library.mkdir()
+        with self.config.open("a") as config:
+            config.write(f'xochitl_dir = "{self.library}"\n')
+            config.write('reverse_sync_folder = "Zotero"\n')
+        self.configure_broker()
+        with self.broker_reply([b"11111111-1111-4111-8111-111111111111"]):
+            not_found = self.run_cli("queue-for-zotero", "--uuid", uuid, "--mode", "new")
+        self.assertNotEqual(not_found.returncode, 0)
+        self.assertEqual(json.loads(not_found.stdout)["error"], "state_error")
+
+    def setup_pdf_library_document(self, uuid, name="Test Paper", parent=""):
+        self.setup_library_document(uuid, name=name, parent=parent)
+        (self.library / f"{uuid}.content").write_text(json.dumps({"fileType": "pdf"}))
+        (self.library / f"{uuid}.pdf").write_bytes(b"%PDF-1.7\nTest PDF\n")
+        (self.library / f"{uuid}.pagedata").write_text("Blank\n")
+        annotations_dir = self.library / uuid
+        annotations_dir.mkdir()
+        (annotations_dir / "page1.rm").write_bytes(b"reMarkable .lines file, version=6\n")
+
+    def test_queue_for_zotero_new_mode_duplicates_and_stamps_metadata(self):
+        uuid = "cc4c1d9d-a04a-4f6e-bb08-d6f54cde88b8"
+        self.setup_pdf_library_document(uuid)
+        self.install_stub_localgeta_and_seven_zip()
+        self.configure_broker()
+        folder_uuid = "11111111-1111-4111-8111-111111111111"
+        (self.library / f"{folder_uuid}.metadata").write_text(json.dumps(
+            {"type": "CollectionType", "parent": "", "visibleName": "Zotero", "deleted": False}))
+        with self.config.open("a") as config:
+            config.write('reverse_sync_folder = "Zotero"\n')
+        with self.broker_reply([folder_uuid.encode(), b"ok"]):
+            result = self.run_cli("queue-for-zotero", "--uuid", uuid, "--mode", "new",
+                                   "--tags", "important,unread", "--annotated-only")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data, {
+            "ok": True, "rm_uuid": uuid, "duplicate_uuid": data["duplicate_uuid"],
+            "name": "Test Paper", "mode": "new", "queued_folder": True,
+        })
+        duplicate_content = json.loads(
+            (self.library / f"{data['duplicate_uuid']}.content").read_text())
+        extra = duplicate_content["extraMetadata"]
+        self.assertEqual(extra["ZotbridgeSourceUuid"], uuid)
+        self.assertEqual(extra["ZotbridgeMode"], "new")
+        self.assertEqual(extra["ZotbridgeTags"], "important,unread")
+        self.assertEqual(extra["ZotbridgeAnnotatedOnly"], "true")
+        self.assertTrue((self.library / f"{data['duplicate_uuid']}.pdf").exists())
+        self.assertEqual(
+            (self.library / f"{data['duplicate_uuid']}.pagedata").read_text(), "Blank\n")
+        self.assertTrue(
+            (self.library / data['duplicate_uuid'] / "page1.rm").exists())
+        duplicate_metadata = json.loads(
+            (self.library / f"{data['duplicate_uuid']}.metadata").read_text())
+        self.assertEqual(duplicate_metadata["parent"], folder_uuid)
+        self.assertFalse((self.root / "state.db.json").exists())
+
+    def test_queue_for_zotero_attach_mode_records_mapping_immediately(self):
+        uuid = "cc4c1d9d-a04a-4f6e-bb08-d6f54cde88b8"
+        self.setup_pdf_library_document(uuid)
+        self.install_stub_localgeta_and_seven_zip()
+        self.configure_broker()
+        folder_uuid = "11111111-1111-4111-8111-111111111111"
+        (self.library / f"{folder_uuid}.metadata").write_text(json.dumps(
+            {"type": "CollectionType", "parent": "", "visibleName": "Zotero", "deleted": False}))
+        with self.config.open("a") as config:
+            config.write('reverse_sync_folder = "Zotero"\n')
+        with self.broker_reply([folder_uuid.encode(), b"ok"]):
+            result = self.run_cli("queue-for-zotero", "--uuid", uuid, "--mode", "attach",
+                                   "--parent-key", "ITEM1234")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data["mode"], "attach")
+        state = json.loads((self.root / "state.db.json").read_text())
+        self.assertEqual(state["mappings"][uuid]["zotero_item_key"], "ITEM1234")
+
+    def test_send_to_zotero_requires_at_least_one_variant(self):
+        uuid = "cc4c1d9d-a04a-4f6e-bb08-d6f54cde88b8"
+        result = self.run_cli("send-to-zotero", "--uuid", uuid, "--mode", "new")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(json.loads(result.stdout)["error"], "ValueError")
+
+    def test_send_to_zotero_validates_mode_and_related_options(self):
+        uuid = "cc4c1d9d-a04a-4f6e-bb08-d6f54cde88b8"
+        cases = [
+            (["--uuid", uuid, "--mode", "bogus", "--send-plain"], "ValueError"),
+            (["--uuid", uuid, "--mode", "attach", "--send-plain"], "ValueError"),
+            (["--uuid", uuid, "--mode", "new", "--parent-key", "ITEM1234", "--send-plain"], "ValueError"),
+            (["--uuid", uuid, "--mode", "attach", "--parent-key", "ITEM1234",
+              "--collection", "COLL1234", "--send-plain"], "ValueError"),
+            (["--uuid", "not-a-uuid", "--mode", "new", "--send-plain"], "ValueError"),
+        ]
+        for args, expected_error in cases:
+            with self.subTest(args=args):
+                result = self.run_cli("send-to-zotero", *args)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(json.loads(result.stdout)["error"], expected_error)
+
+    def test_send_to_zotero_rejects_missing_or_non_pdf_document(self):
+        uuid = "cc4c1d9d-a04a-4f6e-bb08-d6f54cde88b8"
+        self.library = self.root / "library"
+        self.library.mkdir()
+        with self.config.open("a") as config:
+            config.write(f'xochitl_dir = "{self.library}"\n')
+            config.write('reverse_sync_folder = "Zotero"\n')
+        self.install_stub_localgeta_and_seven_zip()
+        # zotbridge-shell.sh already checked --send-plain-or-similar presence and
+        # webdav/library configuration before this point can be reached; here we
+        # confirm send_to_zotero's own document existence/type checks.
+        missing = self.run_cli("send-to-zotero", "--uuid", uuid, "--mode", "new", "--send-plain")
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertEqual(json.loads(missing.stdout)["error"], "FileNotFoundError")
+        self.setup_library_document(uuid)
+        (self.library / f"{uuid}.content").write_text(json.dumps({"fileType": "epub"}))
+        (self.library / f"{uuid}.pdf").write_bytes(b"not actually used")
+        not_pdf = self.run_cli("send-to-zotero", "--uuid", uuid, "--mode", "new", "--send-plain")
+        self.assertNotEqual(not_pdf.returncode, 0)
+        self.assertEqual(json.loads(not_pdf.stdout)["error"], "unsupported_export")
+
+    def test_send_to_zotero_rejects_invalid_attach_parent(self):
+        uuid = "cc4c1d9d-a04a-4f6e-bb08-d6f54cde88b8"
+        self.setup_pdf_library_document(uuid)
+        self.install_stub_localgeta_and_seven_zip()
+        result = self.run_cli("send-to-zotero", "--uuid", uuid, "--mode", "attach",
+                               "--parent-key", "HOSTED12", "--send-plain")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(json.loads(result.stdout)["error"], "ValueError")
+
+    def test_send_to_zotero_requires_localgeta_only_for_markup_variants(self):
+        uuid = "cc4c1d9d-a04a-4f6e-bb08-d6f54cde88b8"
+        self.setup_pdf_library_document(uuid)
+        seven_zip = self.bin / "7zz"
+        seven_zip.write_text("#!/bin/sh\nexit 1\n")
+        seven_zip.chmod(0o755)
+        self.env["ZOTBRIDGE_7ZZ"] = str(seven_zip)
+        merged = self.run_cli("send-to-zotero", "--uuid", uuid, "--mode", "new", "--send-merged")
+        self.assertNotEqual(merged.returncode, 0)
+        self.assertEqual(json.loads(merged.stdout)["error"], "missing_dependency")
+
+    def test_send_to_zotero_skips_markup_variants_without_uploading_when_no_annotations(self):
+        uuid = "cc4c1d9d-a04a-4f6e-bb08-d6f54cde88b8"
+        self.setup_pdf_library_document(uuid)
+        # zotbridge-localgeta itself now decides whether a document has any
+        # markup: -k means "annotated pages only", and it exits 3 when none
+        # qualify. There is no broker call in this path anymore.
+        local_geta = self.bin / "zotbridge-localgeta"
+        local_geta.write_text(
+            "#!/bin/sh\n"
+            'k=; for arg do case "$prev" in -output) out=$arg;; esac\n'
+            '  case "$arg" in -k) k=1;; esac; prev=$arg; done\n'
+            '[ -n "$k" ] && exit 3\n'
+            'printf "%%PDF-1.7\\nExported\\n" >"$out"\n'
+        )
+        local_geta.chmod(0o755)
+        self.env["ZOTBRIDGE_LOCALGETA"] = str(local_geta)
+        seven_zip = self.bin / "7zz"
+        seven_zip.write_text("#!/bin/sh\nexit 1\n")
+        seven_zip.chmod(0o755)
+        self.env["ZOTBRIDGE_7ZZ"] = str(seven_zip)
+        result = self.run_cli("send-to-zotero", "--uuid", uuid, "--mode", "new", "--send-merged")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(result.stdout)
+        self.assertTrue(data["ok"])
+        self.assertIsNone(data["zotero_item_key"])
+        self.assertEqual(data["variants"], [{"variant": "merged", "status": "skipped_no_markup"}])
+        self.assertFalse(data["tags_updated"])
+        self.assertFalse(self.requests.exists())
+        self.assertFalse((self.root / "state.db.json").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

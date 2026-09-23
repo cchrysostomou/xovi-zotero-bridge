@@ -51,7 +51,7 @@ class ZoteroQuickSyncQmdTests(unittest.TestCase):
         with zipfile.ZipFile(package) as archive:
             self.assertEqual(set(archive.namelist()), {
                 "README.md", "3.27/zoteroQuickSync.qmd", "3.28/zoteroQuickSync.qmd",
-                "3.28/zoteroBridgeSettings.qmd",
+                "3.28/zoteroBridgeSettings.qmd", "3.28/zoteroSendToZotero.qmd",
             })
             for name in archive.namelist():
                 self.assertNotIn("\r", archive.read(name).decode("utf-8"))
@@ -73,8 +73,22 @@ class ZoteroQuickSyncQmdTests(unittest.TestCase):
         self.assertIn('"tags", "--refresh", "--json"', qml)
         self.assertIn('"import", "--item-key"', qml)
         self.assertIn("selectedTags", qml)
-        self.assertIn("pagination.next_skip", qml)
-        self.assertIn("onPressAndHold: app.importItem", qml)
+        self.assertIn("pageCount()", qml)
+        self.assertIn("currentPage()", qml)
+        self.assertIn("onClicked: app.tapItem", qml)
+        self.assertIn("onPressAndHold: app.selectAllAttachmentsForItem", qml)
+        self.assertIn("app.toggleAttachmentSelection", qml)
+        self.assertIn("app.startBatchDownload", qml)
+        self.assertIn("app.logVisible = !app.logVisible", qml)
+        self.assertIn('"Hide log" : "Show log"', qml)
+        self.assertIn("appendLog(", qml)
+        self.assertIn("app.itemRemarkablePath", qml)
+        self.assertIn('"On reMarkable: "', qml)
+        self.assertIn('color: "#0000ee"', qml)
+        self.assertIn('"children", "--item-key"', qml)
+        self.assertIn("--attachment-key", qml)
+        self.assertIn("--include-zotero-tags", qml)
+        self.assertIn("--add-unread-tag", qml)
         self.assertNotIn("api_key", qml)
         self.assertNotIn("webdav_password", qml)
 
@@ -101,15 +115,11 @@ class ZoteroQuickSyncQmdTests(unittest.TestCase):
         self.assertIn('run(["clear-activity-log"])', content)
         self.assertIn('status = "Cleared " + result.cleared + " log events"', content)
         self.assertIn('run(["check-connection", "--webdav"])', content)
-        self.assertIn('"rmapi-repair" : "rmapi-pair"', content)
-        self.assertIn(".zotbridge-rmapi-pair-draft.json", content)
         self.assertIn("Sync to Zotero from reMarkable Cloud", content)
-        self.assertIn("Paired status:", content)
-        self.assertIn('text: bridgeSettings.rmapiPaired ? "Re-pair" : "Pair"', content)
         self.assertIn("reverse_sync_folder: reverseFolderInput.text", content)
         self.assertIn('text: "Zotero/Read"', content)
-        self.assertIn("maximumLength: 8", content)
-        self.assertIn('rmapiCode.text = "";', content)
+        self.assertNotIn("rmapi", content)
+        self.assertNotIn("Pair", content)
         self.assertIn("openTagPicker", content)
         self.assertIn("Repeater", content)
         self.assertIn("bridgeSettings.tags", content)
