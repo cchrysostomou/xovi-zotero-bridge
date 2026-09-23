@@ -877,7 +877,7 @@ broker() {
 }
 
 doc_status() {
-    local uuid=$1 title= item_key attachment_key updated_at
+    local uuid=$1 title= item_key attachment_key updated_at stale=false
     load_state
     "$JQ" -c --arg uuid "$uuid" '.mappings[$uuid] // null' "$WORK/state.json" >"$WORK/doc-status-mapping.json"
     if "$JQ" -e '.==null' "$WORK/doc-status-mapping.json" >/dev/null; then
@@ -890,13 +890,54 @@ doc_status() {
     if [[ $item_key =~ ^[A-Z0-9]{8}$ ]]; then
         request zotero "$API/items/$item_key" "$WORK/doc-status-item.json" 8388608 "$ZOTERO_TIMEOUT"
         if [[ $HTTP_CODE == 200 ]] && "$JQ" -e '.' "$WORK/doc-status-item.json" >/dev/null 2>&1; then
-            title="$("$JQ" -r '.data.title // ""' "$WORK/doc-status-item.json")"
+            # A trashed item still answers 200, so treat .data.deleted as gone too:
+            # the link is unusable for further uploads either way.
+            if "$JQ" -e '(.data.deleted // false)==true' "$WORK/doc-status-item.json" >/dev/null 2>&1; then
+                stale=true
+            else
+                title="$("$JQ" -r '.data.title // ""' "$WORK/doc-status-item.json")"
+            fi
+        elif [[ $HTTP_CODE == 404 || $HTTP_CODE == 410 ]]; then
+            stale=true
         fi
+    else
+        stale=true
+    fi
+    # Only a definitive "this key is gone" answer drops the link. Network
+    # failures, auth errors and rate limits leave HTTP_CODE at something else
+    # and must keep the mapping intact, or an offline tablet would silently
+    # unlink every document it looked at.
+    if [[ $stale == true ]] && drop_stale_mapping "$uuid" "$item_key"; then
+        "$JQ" -cn --arg uuid "$uuid" --arg item "$item_key" \
+          '{ok:true,rm_uuid:$uuid,mapped:false,unlinked:true,stale_zotero_item_key:$item}'
+        return
     fi
     "$JQ" -cn --arg uuid "$uuid" --arg item "$item_key" --arg attachment "$attachment_key" \
       --arg title "$title" --arg updated "$updated_at" \
       '{ok:true,rm_uuid:$uuid,mapped:true,zotero_item_key:$item,zotero_attachment_key:$attachment,
         zotero_item_title:$title,updated_at:$updated}'
+}
+
+# Removes a document's Zotero linkage after the linked item has been confirmed
+# missing (404/410, trashed, or a structurally invalid key). Best-effort: a
+# busy lock or a mapping that vanished underneath us returns non-zero so the
+# caller keeps reporting the existing mapping rather than claiming an unlink
+# that did not happen.
+drop_stale_mapping() {
+    local uuid=$1 stale_item=${2:-}
+    exec {json_lock}>>"$STATE.lock"
+    flock -n "$json_lock" || { exec {json_lock}>&-; return 1; }
+    load_state
+    if ! "$JQ" -L "$ROOT_DIR/scripts" --arg uuid "$uuid" \
+      'include "zotbridge-shell-mapping"; drop_mapping($uuid)' \
+      "$WORK/state.json" >"$WORK/state-next.json"; then
+        exec {json_lock}>&-
+        return 1
+    fi
+    save_state
+    exec {json_lock}>&-
+    activity_event failed stale_zotero_link "" "" "$stale_item"
+    return 0
 }
 doc_tags() {
     local uuid=$1

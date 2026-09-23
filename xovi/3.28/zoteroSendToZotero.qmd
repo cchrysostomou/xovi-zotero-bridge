@@ -124,12 +124,14 @@ AFFECT [[1224665461898798997]]
                 property var tagsList: []
                 property var tagSelection: ({})
                 property string mode: "new"
-                property bool sendPlain: true
-                property bool sendMerged: false
+                property bool sendPlain: false
+                property bool sendMerged: true
                 property bool sendAnnotatedOnly: false
                 property bool mapped: false
                 property string mappedTitle: ""
                 property string mappedItemKey: ""
+                property bool staleUnlinked: false
+                property string staleItemKey: ""
                 property string parentKey: ""
                 property var searchResults: []
                 property var collectionsList: []
@@ -161,9 +163,10 @@ AFFECT [[1224665461898798997]]
                 onVisibleChanged: {
                     if (visible) {
                         docUuid = !!~&7712934851008712&~ ? ~&7712934851008712&~.~&5972374&~ : "";
-                        mode = "new"; sendPlain = true; sendMerged = false; sendAnnotatedOnly = false;
+                        mode = "new"; sendPlain = false; sendMerged = true; sendAnnotatedOnly = false;
                         parentKey = ""; searchResults = []; tagSelection = ({});
                         tagsList = []; mapped = false; mappedTitle = ""; mappedItemKey = ""; newTagText = "";
+                        staleUnlinked = false; staleItemKey = "";
                         docTitle = ""; zoteroParentSearch.text = "";
                         collectionsList = []; collectionKey = ""; collectionName = "No collection";
                         collectionPickerOpen = false; collectionFilter = "";
@@ -325,6 +328,8 @@ AFFECT [[1224665461898798997]]
                         mapped = !!result.mapped;
                         mappedTitle = result.zotero_item_title || "";
                         mappedItemKey = result.zotero_item_key || "";
+                        staleUnlinked = !!result.unlinked;
+                        staleItemKey = result.stale_zotero_item_key || "";
                         mode = mapped ? "attach" : "new";
                         if (mapped) {
                             parentKey = mappedItemKey;
@@ -341,7 +346,10 @@ AFFECT [[1224665461898798997]]
                         tagSelection = selection;
                         statusText = mapped ?
                             ("Already linked to \"" + mappedTitle + "\".") :
-                            "Not yet linked to Zotero. Choose how to send it.";
+                            (staleUnlinked ?
+                             ("Previous Zotero link (" + staleItemKey +
+                              ") no longer exists and was removed. Choose how to send it.") :
+                             "Not yet linked to Zotero. Choose how to send it.");
                         if (!mapped) runCollections();
                     } else if (kind === "send") {
                         var uploadedCount = 0, skippedCount = 0, failedCount = 0;

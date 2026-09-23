@@ -77,6 +77,19 @@ AFFECT [[12599552112012170435]]
                         });
                     }
 
+                    function dismissKeyboard() {
+                        urlInput.focus = false;
+                        usernameInput.focus = false;
+                        passwordInput.focus = false;
+                        folderInput.focus = false;
+                        listPageLimitInput.focus = false;
+                        queueInput.focus = false;
+                        syncedInput.focus = false;
+                        reverseFolderInput.focus = false;
+                        openTagPicker = "";
+                        Qt.inputMethod.hide();
+                    }
+
                     AsyncCommandExecutor {
                         id: settingsCommand
                         command: "sh"
@@ -187,6 +200,11 @@ AFFECT [[12599552112012170435]]
                         run(["settings", "--json"]);
                     }
 
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: bridgeSettings.dismissKeyboard()
+                    }
+
                     Flickable {
                         anchors.fill: parent
                         contentWidth: width
@@ -203,16 +221,28 @@ AFFECT [[12599552112012170435]]
                             Text { text: bridgeSettings.status; font.pixelSize: 22; wrapMode: Text.WordWrap; width: parent.width }
                             Text { text: "WebDAV storage"; font.pixelSize: 30; font.bold: true }
                             Text { text: "Server URL (HTTPS)"; font.pixelSize: 22 }
-                            TextInput { id: urlInput; width: parent.width; font.pixelSize: 24; selectByMouse: true }
+                            TextInput { id: urlInput; width: parent.width; font.pixelSize: 24; selectByMouse: true
+                                Keys.onReturnPressed: bridgeSettings.dismissKeyboard()
+                                Keys.onEnterPressed: bridgeSettings.dismissKeyboard()
+                            }
                             Rectangle { width: parent.width; height: 2; color: "black" }
                             Text { text: "Username"; font.pixelSize: 22 }
-                            TextInput { id: usernameInput; width: parent.width; font.pixelSize: 24; selectByMouse: true }
+                            TextInput { id: usernameInput; width: parent.width; font.pixelSize: 24; selectByMouse: true
+                                Keys.onReturnPressed: bridgeSettings.dismissKeyboard()
+                                Keys.onEnterPressed: bridgeSettings.dismissKeyboard()
+                            }
                             Rectangle { width: parent.width; height: 2; color: "black" }
                             Text { text: "Password"; font.pixelSize: 22 }
-                            TextInput { id: passwordInput; width: parent.width; font.pixelSize: 24; echoMode: TextInput.Password; selectByMouse: true }
+                            TextInput { id: passwordInput; width: parent.width; font.pixelSize: 24; echoMode: TextInput.Password; selectByMouse: true
+                                Keys.onReturnPressed: bridgeSettings.dismissKeyboard()
+                                Keys.onEnterPressed: bridgeSettings.dismissKeyboard()
+                            }
                             Text { id: passwordHint; font.pixelSize: 18 }
                             Text { text: "reMarkable folder path"; font.pixelSize: 22 }
-                            TextInput { id: folderInput; width: parent.width; font.pixelSize: 24; selectByMouse: true }
+                            TextInput { id: folderInput; width: parent.width; font.pixelSize: 24; selectByMouse: true
+                                Keys.onReturnPressed: bridgeSettings.dismissKeyboard()
+                                Keys.onEnterPressed: bridgeSettings.dismissKeyboard()
+                            }
                             Rectangle { width: parent.width; height: 2; color: "black" }
                             Text { text: "List page size (1-100)"; font.pixelSize: 22 }
                             TextInput {
@@ -224,6 +254,8 @@ AFFECT [[12599552112012170435]]
                                     var digitsOnly = text.replace(/[^0-9]/g, "");
                                     if (digitsOnly !== text) text = digitsOnly;
                                 }
+                                Keys.onReturnPressed: bridgeSettings.dismissKeyboard()
+                                Keys.onEnterPressed: bridgeSettings.dismissKeyboard()
                             }
                             Rectangle { width: parent.width; height: 2; color: "black" }
                             Text { text: "Queue tag"; font.pixelSize: 22 }
@@ -243,6 +275,8 @@ AFFECT [[12599552112012170435]]
                                         if (activeFocus && bridgeSettings.tags.length > 0)
                                             bridgeSettings.openTagPicker = "queue";
                                     }
+                                    Keys.onReturnPressed: bridgeSettings.dismissKeyboard()
+                                    Keys.onEnterPressed: bridgeSettings.dismissKeyboard()
                                 }
                             }
                             Text { text: "Completion tag"; font.pixelSize: 22 }
@@ -262,6 +296,8 @@ AFFECT [[12599552112012170435]]
                                         if (activeFocus && bridgeSettings.tags.length > 0)
                                             bridgeSettings.openTagPicker = "synced";
                                     }
+                                    Keys.onReturnPressed: bridgeSettings.dismissKeyboard()
+                                    Keys.onEnterPressed: bridgeSettings.dismissKeyboard()
                                 }
                             }
                             Flickable {
@@ -286,6 +322,7 @@ AFFECT [[12599552112012170435]]
                                                     queueInput.focus = false;
                                                     syncedInput.focus = false;
                                                     bridgeSettings.openTagPicker = "";
+                                                    Qt.inputMethod.hide();
                                                 }
                                             }
                                         }
@@ -312,6 +349,8 @@ AFFECT [[12599552112012170435]]
                                 id: reverseFolderInput
                                 width: parent.width; font.pixelSize: 24; selectByMouse: true
                                 text: "Zotero/Read"
+                                Keys.onReturnPressed: bridgeSettings.dismissKeyboard()
+                                Keys.onEnterPressed: bridgeSettings.dismissKeyboard()
                             }
                             Rectangle { width: parent.width; height: 2; color: "black" }
                             Text { text: "Available Zotero tags"; font.pixelSize: 30; font.bold: true }

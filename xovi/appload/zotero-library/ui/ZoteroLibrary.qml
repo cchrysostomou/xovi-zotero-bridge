@@ -23,6 +23,7 @@ Rectangle {
     property bool busy: false
     property bool tagsVisible: false
     property bool collectionsVisible: false
+    property bool hideOnRemarkable: false
     property string tagAlphaFilter: "All"
     property int activeIndex: -1
     property string lastQuery: ""
@@ -325,6 +326,24 @@ Rectangle {
 
     function itemRemarkablePath(item) {
         return (item.mapping && item.mapping.rm_path) ? item.mapping.rm_path : "";
+    }
+
+    function isOnRemarkable(item) {
+        return !!(item && item.mapping);
+    }
+
+    function visibleItems() {
+        if (!hideOnRemarkable) return items;
+        var out = [];
+        for (var i = 0; i < items.length; i++) {
+            if (!isOnRemarkable(items[i])) out.push(items[i]);
+        }
+        return out;
+    }
+
+    function hiddenItemCount() {
+        if (!hideOnRemarkable) return 0;
+        return items.length - visibleItems().length;
     }
 
     function fetchChildren(item, index) {
@@ -792,7 +811,9 @@ Rectangle {
             visible: app.selectedCount > 0
             width: parent.width
             height: visible ? 64 : 0
-            color: "black"
+            color: "white"
+            border.width: 1
+            border.color: "black"
             Row {
                 anchors.fill: parent
                 anchors.margins: 8
@@ -800,7 +821,7 @@ Rectangle {
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
                     text: app.selectedCount + " selected"
-                    color: "white"
+                    color: "black"
                     font.pixelSize: 20
                 }
                 Row {
@@ -810,12 +831,12 @@ Rectangle {
                         width: 26
                         height: 26
                         border.width: 2
-                        border.color: "white"
-                        color: app.batchIncludeZoteroTags ? "white" : "black"
+                        border.color: "black"
+                        color: app.batchIncludeZoteroTags ? "black" : "white"
                         Text {
                             anchors.centerIn: parent
                             text: app.batchIncludeZoteroTags ? "✓" : ""
-                            color: "black"
+                            color: "white"
                             font.pixelSize: 18
                             font.bold: true
                         }
@@ -827,7 +848,7 @@ Rectangle {
                     Text {
                         anchors.verticalCenter: parent.verticalCenter
                         text: "Zotero tags"
-                        color: "white"
+                        color: "black"
                         font.pixelSize: 16
                     }
                 }
@@ -838,12 +859,12 @@ Rectangle {
                         width: 26
                         height: 26
                         border.width: 2
-                        border.color: "white"
-                        color: app.batchAddUnreadTag ? "white" : "black"
+                        border.color: "black"
+                        color: app.batchAddUnreadTag ? "black" : "white"
                         Text {
                             anchors.centerIn: parent
                             text: app.batchAddUnreadTag ? "✓" : ""
-                            color: "black"
+                            color: "white"
                             font.pixelSize: 18
                             font.bold: true
                         }
@@ -855,7 +876,7 @@ Rectangle {
                     Text {
                         anchors.verticalCenter: parent.verticalCenter
                         text: "Unread"
-                        color: "white"
+                        color: "black"
                         font.pixelSize: 16
                     }
                 }
@@ -863,12 +884,13 @@ Rectangle {
                     width: 130
                     height: 44
                     anchors.verticalCenter: parent.verticalCenter
-                    color: "white"
+                    color: "black"
                     Text {
                         anchors.centerIn: parent
                         text: app.downloadQueueTotal > 0 ?
                               "Downloading " + app.downloadQueueDone + "/" + app.downloadQueueTotal :
                               "Download"
+                        color: "white"
                         font.pixelSize: 16
                     }
                     MouseArea {
@@ -881,10 +903,11 @@ Rectangle {
                     width: 90
                     height: 44
                     anchors.verticalCenter: parent.verticalCenter
-                    color: "white"
+                    color: "black"
                     Text {
                         anchors.centerIn: parent
                         text: "Cancel"
+                        color: "white"
                         font.pixelSize: 16
                     }
                     MouseArea {
@@ -896,14 +919,55 @@ Rectangle {
             }
         }
 
-        Text {
+        Item {
             width: parent.width
             height: 60
-            verticalAlignment: Text.AlignVCenter
-            horizontalAlignment: Text.AlignHCenter
-            text: "Page " + app.currentPage() + "/" + app.pageCount() +
-                  " (" + app.pagination.total + " total items)"
-            font.pixelSize: 22
+            Text {
+                id: pageCountLabel
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                width: parent.width - notOnRmFilter.width - 16
+                verticalAlignment: Text.AlignVCenter
+                horizontalAlignment: Text.AlignHCenter
+                text: "Page " + app.currentPage() + "/" + app.pageCount() +
+                      " (" + app.pagination.total + " total items)" +
+                      (app.hiddenItemCount() > 0 ? "  ·  " + app.hiddenItemCount() + " hidden" : "")
+                font.pixelSize: 22
+                elide: Text.ElideRight
+            }
+            Row {
+                id: notOnRmFilter
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: 8
+                Rectangle {
+                    width: 30
+                    height: 30
+                    anchors.verticalCenter: parent.verticalCenter
+                    border.width: 2
+                    border.color: "black"
+                    color: app.hideOnRemarkable ? "black" : "white"
+                    Text {
+                        anchors.centerIn: parent
+                        text: app.hideOnRemarkable ? "✓" : ""
+                        color: "white"
+                        font.pixelSize: 20
+                        font.bold: true
+                    }
+                }
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "Not on reMarkable"
+                    font.pixelSize: 18
+                }
+            }
+            MouseArea {
+                anchors.fill: notOnRmFilter
+                onClicked: {
+                    app.hideOnRemarkable = !app.hideOnRemarkable;
+                    app.activeIndex = -1;
+                }
+            }
         }
 
         Flickable {
@@ -970,8 +1034,20 @@ Rectangle {
                 Column {
                     id: paperList
                     width: parent.width
+                    Text {
+                        visible: app.visibleItems().length === 0
+                        width: parent.width
+                        height: visible ? 80 : 0
+                        verticalAlignment: Text.AlignVCenter
+                        horizontalAlignment: Text.AlignHCenter
+                        wrapMode: Text.WordWrap
+                        font.pixelSize: 20
+                        text: app.hiddenItemCount() > 0 ?
+                              "All " + app.hiddenItemCount() + " items on this page are already on reMarkable." :
+                              "No papers to show."
+                    }
                     Repeater {
-                        model: app.items
+                        model: app.visibleItems()
                         delegate: Rectangle {
                             id: itemRow
                             property var paperItem: modelData
