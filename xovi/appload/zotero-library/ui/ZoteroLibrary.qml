@@ -188,7 +188,10 @@ Rectangle {
             "/home/root/xovi-zotero-bridge/scripts/zotbridge-run.sh"
         ].concat(arguments);
         appendLog("→ " + arguments.join(" "));
-        if (!bridgeCommand.startCommand(action === "import" ? 60000 : 30000)) {
+        // Listing a collection with many subcollections has to expand the
+        // whole tree over the network on a cold cache, which can take far
+        // longer than a flat listing.
+        if (!bridgeCommand.startCommand(action === "import" || action === "list" ? 60000 : 30000)) {
             busy = false;
             status = "Could not start bridge command";
             appendLog("✕ could not start bridge command");
@@ -210,7 +213,7 @@ Rectangle {
         run(["settings", "--json"], "settings");
     }
 
-    function listArguments(skip) {
+    function listArguments(skip, forceRefresh) {
         var args = ["list", "--page-info", "--limit", String(pagination.limit),
                     "--skip", String(skip), "--query", searchInput.text];
         for (var i = 0; i < selectedTags.length; i++) {
@@ -221,6 +224,9 @@ Rectangle {
             args.push("--collection");
             args.push(selectedCollection);
         }
+        // Refresh must also drop the backend's cached subcollection
+        // membership, or a nested collection keeps serving stale contents.
+        if (forceRefresh) args.push("--refresh");
         return args;
     }
 
@@ -243,7 +249,7 @@ Rectangle {
         pendingCacheKey = key;
         status = "Loading Zotero papers…";
         items = [];
-        run(listArguments(skip), "list");
+        run(listArguments(skip, forceRefresh === true), "list");
     }
 
     function refreshCurrentPage() {
@@ -309,9 +315,67 @@ Rectangle {
 
     function filteredCollections() {
         var query = collectionSearch.text.toLowerCase();
-        return collections.filter(function(collection) {
-            return query.length === 0 || collection.name.toLowerCase().indexOf(query) !== -1;
+        if (query.length === 0) return collectionTree;
+        // Searching flattens the hierarchy: match on the collection's own
+        // name, but show the full path so same-named children stay distinct.
+        var rows = collectionTree;
+        var out = [];
+        for (var i = 0; i < rows.length; i++) {
+            if (rows[i].name.toLowerCase().indexOf(query) !== -1)
+                out.push({key: rows[i].key, name: rows[i].name,
+                          path: rows[i].path, depth: 0, flat: true});
+        }
+        out.sort(function(a, b) {
+            var an = a.name.toLowerCase(), bn = b.name.toLowerCase();
+            return an < bn ? -1 : (an > bn ? 1 : 0);
         });
+        return out;
+    }
+
+    // Flattens `collections` into display order: each child directly follows
+    // its parent, carrying a depth for indentation and a "Parent / Child"
+    // path for the flattened search view. Held as a binding rather than a
+    // function so it is recomputed only when `collections` changes, and so
+    // the unfiltered picker keeps handing the Repeater the same array
+    // instead of rebuilding every delegate on each re-evaluation.
+    property var collectionTree: {
+        var byParent = {};
+        var known = {};
+        var i;
+        for (i = 0; i < collections.length; i++) known[collections[i].key] = true;
+        for (i = 0; i < collections.length; i++) {
+            var c = collections[i];
+            // A parent that isn't in the library (trashed, or outside this
+            // library's scope) would otherwise strand its children and hide
+            // them entirely, so treat those as top level.
+            var p = (c.parent && known[c.parent]) ? c.parent : "";
+            if (!byParent[p]) byParent[p] = [];
+            byParent[p].push(c);
+        }
+        for (var k in byParent) {
+            byParent[k].sort(function(a, b) {
+                var an = (a.name || "").toLowerCase(), bn = (b.name || "").toLowerCase();
+                return an < bn ? -1 : (an > bn ? 1 : 0);
+            });
+        }
+        var out = [];
+        var seen = {};
+        var walk = function(parentKey, depth, prefix) {
+            var kids = byParent[parentKey] || [];
+            for (var j = 0; j < kids.length; j++) {
+                var kid = kids[j];
+                // Defensive: a cycle in cached data would otherwise recurse
+                // until the UI hangs.
+                if (seen[kid.key]) continue;
+                seen[kid.key] = true;
+                var path = prefix.length > 0 ? (prefix + " / " + kid.name) : kid.name;
+                out.push({key: kid.key, name: kid.name, path: path,
+                          depth: depth, flat: false});
+                walk(kid.key, depth + 1, path);
+            }
+        };
+        walk("", 0, "");
+        return out;
     }
 
     function itemSubtitle(item) {
@@ -792,9 +856,10 @@ Rectangle {
                                 border.color: "black"
                                 Text {
                                     anchors.verticalCenter: parent.verticalCenter
-                                    x: 12
-                                    width: parent.width - 24
-                                    text: modelData.name
+                                    x: 12 + modelData.depth * 26
+                                    width: parent.width - 24 - modelData.depth * 26
+                                    text: modelData.flat ? modelData.path :
+                                          ((modelData.depth > 0 ? "└ " : "") + modelData.name)
                                     color: app.selectedCollection === modelData.key ? "white" : "black"
                                     font.pixelSize: 21
                                     elide: Text.ElideRight

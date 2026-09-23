@@ -139,14 +139,70 @@ AFFECT [[1224665461898798997]]
                 property string collectionName: "No collection"
                 property bool collectionPickerOpen: false
                 property string collectionFilter: ""
+                // Flattened display order: each child directly follows its
+                // parent, carrying a depth for indentation and a
+                // "Parent / Child" path used by the filtered view.
+                property var collectionTree: {
+                    var list = collectionsList;
+                    var byParent = ({});
+                    var known = ({});
+                    var i;
+                    for (i = 0; i < list.length; i++) known[list[i].key] = true;
+                    for (i = 0; i < list.length; i++) {
+                        var c = list[i];
+                        // A parent outside this library (trashed, or not
+                        // visible) would otherwise strand its children and
+                        // hide them entirely, so treat those as top level.
+                        var p = (c.parent && known[c.parent]) ? c.parent : "";
+                        if (!byParent[p]) byParent[p] = [];
+                        byParent[p].push(c);
+                    }
+                    var byName = function(a, b) {
+                        var an = (a.name || "").toLowerCase(), bn = (b.name || "").toLowerCase();
+                        return an < bn ? -1 : (an > bn ? 1 : 0);
+                    };
+                    for (var k in byParent) byParent[k].sort(byName);
+                    var out = [];
+                    var seen = ({});
+                    var walk = function(parentKey, depth, prefix) {
+                        var children = byParent[parentKey] || [];
+                        for (var n = 0; n < children.length; n++) {
+                            var child = children[n];
+                            // Defensive: a cycle in cached data would
+                            // otherwise recurse until the UI hangs.
+                            if (seen[child.key]) continue;
+                            seen[child.key] = true;
+                            var childPath = prefix.length > 0 ?
+                                            (prefix + " / " + child.name) : child.name;
+                            out.push({key: child.key, name: child.name, path: childPath,
+                                      depth: depth, flat: false});
+                            walk(child.key, depth + 1, childPath);
+                        }
+                    };
+                    walk("", 0, "");
+                    return out;
+                }
                 property var filteredCollections: {
-                    if (collectionFilter === "") return collectionsList;
-                    return collectionsList.filter(function(c) {
-                        var nm = (c.name || "").toUpperCase();
+                    var rows = collectionTree;
+                    if (collectionFilter === "") return rows;
+                    // Filtering flattens the hierarchy: bucket by the
+                    // collection's own name so tapping "N" finds "Notebooks",
+                    // but show the full path so same-named children stay
+                    // distinguishable.
+                    var out = [];
+                    for (var i = 0; i < rows.length; i++) {
+                        var nm = (rows[i].name || "").toUpperCase();
                         var first = nm.length > 0 ? nm.charAt(0) : "#";
                         if (first < "A" || first > "Z") first = "#";
-                        return first === collectionFilter;
+                        if (first === collectionFilter)
+                            out.push({key: rows[i].key, name: rows[i].name,
+                                      path: rows[i].path, depth: 0, flat: true});
+                    }
+                    out.sort(function(a, b) {
+                        var an = a.name.toLowerCase(), bn = b.name.toLowerCase();
+                        return an < bn ? -1 : (an > bn ? 1 : 0);
                     });
+                    return out;
                 }
                 property bool busy: false
                 property string newTagText: ""
@@ -642,9 +698,13 @@ AFFECT [[1224665461898798997]]
                                                         width: collectionResultsColumn.width; height: 40
                                                         color: zoteroSendDialog.collectionKey === modelData.key ? "#dddddd" : "white"
                                                         Text {
-                                                            anchors.verticalCenter: parent.verticalCenter; x: 8
-                                                            width: parent.width - 16; elide: Text.ElideRight
-                                                            text: modelData.name; font.pixelSize: 15
+                                                            anchors.verticalCenter: parent.verticalCenter
+                                                            x: 8 + modelData.depth * 18
+                                                            width: parent.width - 16 - modelData.depth * 18
+                                                            elide: Text.ElideRight
+                                                            text: modelData.flat ? modelData.path :
+                                                                  ((modelData.depth > 0 ? "└ " : "") + modelData.name)
+                                                            font.pixelSize: 15
                                                         }
                                                         MouseArea {
                                                             anchors.fill: parent

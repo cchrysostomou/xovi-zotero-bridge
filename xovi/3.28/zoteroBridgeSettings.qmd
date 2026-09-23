@@ -56,6 +56,10 @@ AFFECT [[12599552112012170435]]
                     property string openTagPicker: ""
                     property string tagFilter: "All"
                     property bool tagsVisible: false
+                    property var collections: []
+                    property string collectionFilter: "All"
+                    property bool collectionsVisible: false
+                    property string pendingKind: ""
                     property string commandError: ""
                     property bool busy: false
 
@@ -75,6 +79,73 @@ AFFECT [[12599552112012170435]]
                         return tags.filter(function(tag) {
                             return tag.length > 0 && tag.charAt(0).toUpperCase() === tagFilter;
                         });
+                    }
+
+                    // Flattens `collections` into display order: each child
+                    // directly follows its parent, carrying a depth for
+                    // indentation and a "Parent / Child" path. Held as a
+                    // binding so it is recomputed only when `collections`
+                    // changes rather than on every filter-button tap.
+                    property var collectionTree: {
+                        var byParent = ({});
+                        var known = ({});
+                        var i;
+                        for (i = 0; i < collections.length; i++) known[collections[i].key] = true;
+                        for (i = 0; i < collections.length; i++) {
+                            var c = collections[i];
+                            // A parent outside this library would otherwise
+                            // strand its children and hide them entirely.
+                            var p = (c.parent && known[c.parent]) ? c.parent : "";
+                            if (!byParent[p]) byParent[p] = [];
+                            byParent[p].push(c);
+                        }
+                        var byName = function(a, b) {
+                            var an = (a.name || "").toLowerCase(), bn = (b.name || "").toLowerCase();
+                            return an < bn ? -1 : (an > bn ? 1 : 0);
+                        };
+                        for (var k in byParent) byParent[k].sort(byName);
+                        var out = [];
+                        var seen = ({});
+                        var walk = function(parentKey, depth, prefix) {
+                            var children = byParent[parentKey] || [];
+                            for (var n = 0; n < children.length; n++) {
+                                var child = children[n];
+                                // Defensive: a cycle in cached data would
+                                // otherwise recurse until the UI hangs.
+                                if (seen[child.key]) continue;
+                                seen[child.key] = true;
+                                var childPath = prefix.length > 0 ?
+                                                (prefix + " / " + child.name) : child.name;
+                                out.push({key: child.key, name: child.name, path: childPath,
+                                          depth: depth, flat: false});
+                                walk(child.key, depth + 1, childPath);
+                            }
+                        };
+                        walk("", 0, "");
+                        return out;
+                    }
+
+                    function visibleCollections() {
+                        var rows = collectionTree;
+                        if (collectionFilter === "All") return rows;
+                        // Filtering flattens the hierarchy and buckets by the
+                        // collection's own name, so "N" finds "Notebooks"
+                        // wherever it sits; the path keeps duplicates apart.
+                        var out = [];
+                        for (var i = 0; i < rows.length; i++) {
+                            var nm = (rows[i].name || "");
+                            if (nm.length === 0) continue;
+                            var isLetter = /[A-Za-z]/.test(nm.charAt(0));
+                            var bucket = isLetter ? nm.charAt(0).toUpperCase() : "#";
+                            if (bucket === collectionFilter)
+                                out.push({key: rows[i].key, name: rows[i].name,
+                                          path: rows[i].path, depth: 0, flat: true});
+                        }
+                        out.sort(function(a, b) {
+                            var an = a.name.toLowerCase(), bn = b.name.toLowerCase();
+                            return an < bn ? -1 : (an > bn ? 1 : 0);
+                        });
+                        return out;
                     }
 
                     function dismissKeyboard() {
@@ -107,6 +178,11 @@ AFFECT [[12599552112012170435]]
                     function run(arguments) {
                         if (busy) return;
                         busy = true;
+                        // Both "tags" and "collections" reply with a bare JSON
+                        // array, so remember which one was asked for rather
+                        // than guessing from the payload shape (an empty
+                        // collection list is indistinguishable otherwise).
+                        pendingKind = arguments.length > 0 ? arguments[0] : "";
                         settingsCommand.output = "";
                         settingsCommand.errorOutput = "";
                         settingsCommand.arguments = [
@@ -131,8 +207,13 @@ AFFECT [[12599552112012170435]]
                             return;
                         }
                         if (Array.isArray(result)) {
-                            tags = result;
-                            status = "Loaded " + result.length + " tags";
+                            if (pendingKind === "collections") {
+                                collections = result;
+                                status = "Loaded " + result.length + " collections";
+                            } else {
+                                tags = result;
+                                status = "Loaded " + result.length + " tags";
+                            }
                             return;
                         }
                         if (settingsCommand.exitCode !== 0 || result.ok !== true) {
@@ -427,8 +508,90 @@ AFFECT [[12599552112012170435]]
                                     }
                                 }
                             }
-                            Text { text: "Recent bridge events"; font.pixelSize: 30; font.bold: true }
+                            Text { text: "Available Zotero collections"; font.pixelSize: 30; font.bold: true }
                             Row {
+                                spacing: 16
+                                Rectangle {
+                                    width: 300; height: 64; color: bridgeSettings.busy ? "#aaaaaa" : "black"
+                                    Text { anchors.centerIn: parent; text: "Refresh collections"; color: "white"; font.pixelSize: 24 }
+                                    MouseArea { anchors.fill: parent; enabled: !bridgeSettings.busy; onClicked: bridgeSettings.run(["collections", "--refresh", "--json"]) }
+                                }
+                                Rectangle {
+                                    width: 260; height: 64; color: "black"
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: bridgeSettings.collectionsVisible ? "Hide collections" : "Show collections"
+                                        color: "white"; font.pixelSize: 22
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        onClicked: {
+                                            bridgeSettings.collectionsVisible = !bridgeSettings.collectionsVisible;
+                                            if (bridgeSettings.collectionsVisible &&
+                                                bridgeSettings.collections.length === 0 && !bridgeSettings.busy)
+                                                bridgeSettings.run(["collections", "--json"]);
+                                        }
+                                    }
+                                }
+                            }
+                            Text { text: bridgeSettings.collections.length + " cached collections available"; font.pixelSize: 20 }
+                            Flickable {
+                                visible: bridgeSettings.collectionsVisible
+                                width: parent.width; height: visible ? 58 : 0; clip: true
+                                contentWidth: collectionFilters.width; contentHeight: height
+                                Column {
+                                    id: collectionFilters; width: collectionFilterRow.width
+                                    Row {
+                                        id: collectionFilterRow
+                                        spacing: 8
+                                        Repeater {
+                                            model: ["All", "#", "A", "B", "C", "D", "E", "F", "G",
+                                                    "H", "I", "J", "K", "L", "M", "N", "O", "P",
+                                                    "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"]
+                                            delegate: Rectangle {
+                                                width: modelData === "All" ? 66 : 44; height: 52
+                                                color: bridgeSettings.collectionFilter === modelData ? "black" : "white"
+                                                border.width: 2; border.color: "black"
+                                                Text {
+                                                    anchors.centerIn: parent; text: modelData
+                                                    color: bridgeSettings.collectionFilter === modelData ? "white" : "black"
+                                                    font.pixelSize: 20
+                                                }
+                                                MouseArea {
+                                                    anchors.fill: parent
+                                                    onClicked: bridgeSettings.collectionFilter = modelData
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Rectangle {
+                                visible: bridgeSettings.collectionsVisible
+                                width: parent.width; height: visible ? 300 : 0
+                                color: "white"; border.width: 2; border.color: "black"
+                                Flickable {
+                                    anchors.fill: parent; anchors.margins: 10
+                                    clip: true
+                                    contentWidth: width; contentHeight: availableCollections.height
+                                    interactive: contentHeight > height
+                                    Column {
+                                        id: availableCollections; width: parent.width
+                                        Repeater {
+                                            model: bridgeSettings.visibleCollections()
+                                            delegate: Text {
+                                                width: availableCollections.width; height: 34
+                                                x: modelData.flat ? 0 : modelData.depth * 22
+                                                elide: Text.ElideRight
+                                                text: modelData.flat ? modelData.path :
+                                                      ((modelData.depth > 0 ? "└ " : "") + modelData.name)
+                                                font.pixelSize: 20
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Text { text: "Recent bridge events"; font.pixelSize: 30; font.bold: true }                            Row {
                                 spacing: 20
                                 Rectangle {
                                     width: 260; height: 64; color: bridgeSettings.busy ? "#aaaaaa" : "black"
