@@ -188,10 +188,7 @@ Rectangle {
             "/home/root/xovi-zotero-bridge/scripts/zotbridge-run.sh"
         ].concat(arguments);
         appendLog("→ " + arguments.join(" "));
-        // Listing a collection with many subcollections has to expand the
-        // whole tree over the network on a cold cache, which can take far
-        // longer than a flat listing.
-        if (!bridgeCommand.startCommand(action === "import" || action === "list" ? 60000 : 30000)) {
+        if (!bridgeCommand.startCommand(action === "import" ? 60000 : 30000)) {
             busy = false;
             status = "Could not start bridge command";
             appendLog("✕ could not start bridge command");
@@ -213,7 +210,7 @@ Rectangle {
         run(["settings", "--json"], "settings");
     }
 
-    function listArguments(skip, forceRefresh) {
+    function listArguments(skip) {
         var args = ["list", "--page-info", "--limit", String(pagination.limit),
                     "--skip", String(skip), "--query", searchInput.text];
         for (var i = 0; i < selectedTags.length; i++) {
@@ -224,9 +221,6 @@ Rectangle {
             args.push("--collection");
             args.push(selectedCollection);
         }
-        // Refresh must also drop the backend's cached subcollection
-        // membership, or a nested collection keeps serving stale contents.
-        if (forceRefresh) args.push("--refresh");
         return args;
     }
 
@@ -249,7 +243,7 @@ Rectangle {
         pendingCacheKey = key;
         status = "Loading Zotero papers…";
         items = [];
-        run(listArguments(skip, forceRefresh === true), "list");
+        run(listArguments(skip), "list");
     }
 
     function refreshCurrentPage() {

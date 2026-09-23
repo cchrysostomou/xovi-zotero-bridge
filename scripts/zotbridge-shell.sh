@@ -180,7 +180,7 @@ while (($#)); do
         --synced-tag) [[ $COMMAND =~ ^sync-(tagged|item)$ && $# -ge 2 ]] || fail ValueError "Invalid --synced-tag option."; SYNCED_TAG=$2; SYNCED_TAG_SET=true; shift 2 ;;
         --page-info) [[ $COMMAND == list ]] || fail ValueError "Invalid --page-info option."; PAGE_INFO=true; shift ;;
         --json) [[ $COMMAND =~ ^(list|tags|collections|settings|children)$ ]] || fail ValueError "Invalid --json option."; AS_JSON=true; shift ;;
-        --refresh) [[ $COMMAND =~ ^(list|tags|collections)$ ]] || fail ValueError "--refresh is only supported by list, tags and collections."; REFRESH=true; shift ;;
+        --refresh) [[ $COMMAND =~ ^(tags|collections)$ ]] || fail ValueError "--refresh is only supported by tags and collections."; REFRESH=true; shift ;;
         --item-key) [[ $COMMAND =~ ^(import|status|check-connection|sync-item|children)$ && $# -ge 2 ]] || fail ValueError "Invalid --item-key option."; ITEM_KEY=$2; shift 2 ;;
         --attachment-key) [[ $COMMAND == import && $# -ge 2 ]] || fail ValueError "Invalid --attachment-key option."; ATTACHMENT_KEY_OPT=$2; shift 2 ;;
         --target-folder) [[ $COMMAND =~ ^(import|ensure-folder|sync-tagged|sync-item)$ && $# -ge 2 ]] || fail ValueError "Invalid --target-folder option."; TARGET=$2; TARGET_GIVEN=true; shift 2 ;;
@@ -327,10 +327,6 @@ API="https://api.zotero.org/${LIBRARY_TYPE}s/$LIBRARY_ID"
 LIBRARY_SCOPE="$LIBRARY_TYPE:$LIBRARY_ID"
 BROKER_TIMEOUT="$(get_config broker_timeout_s)"
 ZOTERO_TIMEOUT="$(get_config zotero_timeout_s)"
-# Seconds a cached collection-membership list stays usable. Long enough that
-# paging through a nested collection reuses it, short enough that edits made
-# in Zotero show up without an explicit refresh.
-MEMBER_CACHE_TTL=600
 WEBDAV_TIMEOUT="$(get_config webdav_timeout_s)"
 MAX_BYTES=$(($(get_config zotero_max_download_mb) * 1024 * 1024))
 [[ $USE_WEBDAV != true ]] || MAX_BYTES=$(($(get_config webdav_max_download_mb) * 1024 * 1024))
@@ -339,13 +335,6 @@ lock_state() {
     mkdir -p -- "$(dirname -- "$STATE")"
     exec {json_lock}>>"$STATE.lock"
     flock -n "$json_lock" || fail busy "Another operation is using this JSON state; try later."
-}
-# Non-fatal variant for opportunistic cache writes, where losing the race
-# should degrade to "not cached" rather than failing the user's request.
-try_lock_state() {
-    mkdir -p -- "$(dirname -- "$STATE")"
-    exec {json_lock}>>"$STATE.lock"
-    flock -n "$json_lock" || { exec {json_lock}>&-; return 1; }
 }
 load_state() {
     [[ ! -L $STATE ]] || fail state_error "JSON state must not be a symbolic link."
@@ -537,14 +526,9 @@ check_webdav_connection() {
         fail webdav_error "WebDAV directory request returned HTTP $HTTP_CODE. Check the URL, credentials and access permissions."
 }
 metadata() {
-    metadata_raw "$1" "$2"
-    "$JQ" -e '.' "$2" >/dev/null || fail zotero_error "Zotero returned invalid metadata JSON."
-}
-# format=keys responses are newline-delimited plain text rather than JSON, so
-# they skip the JSON validation metadata() applies.
-metadata_raw() {
     request zotero "$API/$1" "$2" 8388608 "$ZOTERO_TIMEOUT"
     [[ $HTTP_CODE == 200 ]] || fail zotero_error "Zotero metadata request returned HTTP $HTTP_CODE. Check request parameters, access permissions and API rate limits."
+    "$JQ" -e '.' "$2" >/dev/null || fail zotero_error "Zotero returned invalid metadata JSON."
 }
 find_attachment() {
     local key=$1 start=0 count
@@ -599,7 +583,6 @@ total_results() {
 
 list_zotero_library() {
     local encoded_query paper key has_pdf tag_parameter= encoded_tags total count next_skip base_path
-    local item_filter subtree_size subcollection page_keys members_dirty now_epoch
     load_state
     encoded_query="$(printf '%s' "$QUERY" | "$JQ" -Rrs '@uri')"
     if ((${#TAGS[@]})); then
@@ -615,85 +598,15 @@ list_zotero_library() {
     base_path="items/top"
     [[ -z $COLLECTION ]] || base_path="collections/$COLLECTION/items/top"
     # Zotero permits one itemType parameter; leading '-' negates the OR group.
-    item_filter="q=$encoded_query&itemType=-attachment%20%7C%7C%20note%20%7C%7C%20annotation$tag_parameter"
-    subtree_size=0
-    if [[ -n $COLLECTION ]]; then
-        load_collection_index
-        collection_subtree "$COLLECTION" >"$WORK/subtree-cols.txt"
-        subtree_size="$(grep -c '^[A-Z0-9]\{8\}$' "$WORK/subtree-cols.txt" || true)"
-    fi
-    if ((subtree_size > 1)); then
-        # The Zotero API has no recursive collection query, so a parent's
-        # subcollection items must be gathered client side. Membership is
-        # pulled per collection with format=keys (one cheap line-per-key
-        # response) and intersected against the filtered, sorted key list for
-        # the whole library, which preserves the server's ordering and yields
-        # an exact total without downloading every item's metadata.
-        ((subtree_size <= 500)) || fail zotero_error "Collection tree is too large to expand."
-        metadata_raw "items/top?format=keys&$item_filter&sort=dateModified&direction=desc" \
-          "$WORK/ordered-keys.txt"
-        : >"$WORK/subtree-keys.txt"
-        : >"$WORK/fetched-members.jsonl"
-        members_dirty=false
-        now_epoch="$("$JQ" -n 'now|floor')"
-        while IFS= read -r subcollection; do
-            [[ $subcollection =~ ^[A-Z0-9]{8}$ ]] || continue
-            # Membership rarely changes between pages, so a short-lived cache
-            # keeps paging from re-walking the whole subtree over the network.
-            if [[ $REFRESH == false ]] && "$JQ" -e --arg scope "$LIBRARY_SCOPE" --arg col "$subcollection" \
-              --argjson now "$now_epoch" --argjson ttl "$MEMBER_CACHE_TTL" '
-              (.collection_member_cache[$scope][$col] // null) as $entry
-              | $entry != null and ($entry.keys|type=="array")
-                and ($entry.fetched_at|type=="number")
-                and ($now - $entry.fetched_at) < $ttl' "$WORK/state.json" >/dev/null 2>&1; then
-                "$JQ" -r --arg scope "$LIBRARY_SCOPE" --arg col "$subcollection" \
-                  '.collection_member_cache[$scope][$col].keys[]' \
-                  "$WORK/state.json" >>"$WORK/subtree-keys.txt"
-                continue
-            fi
-            metadata_raw "collections/$subcollection/items/top?format=keys" "$WORK/member-keys.txt"
-            cat "$WORK/member-keys.txt" >>"$WORK/subtree-keys.txt"
-            "$JQ" -Rs --arg col "$subcollection" --argjson now "$now_epoch" \
-              '{key:$col,entry:{fetched_at:$now,
-                keys:[split("\n")[]|select(test("^[A-Z0-9]{8}$"))]}}' \
-              "$WORK/member-keys.txt" >>"$WORK/fetched-members.jsonl"
-            members_dirty=true
-        done <"$WORK/subtree-cols.txt"
-        [[ $members_dirty == false ]] || cache_collection_members
-        grep -x '[A-Z0-9]\{8\}' "$WORK/subtree-keys.txt" | sort -u >"$WORK/subtree-sorted.txt" || true
-        # Intersect in the ordered file's order, not the sorted one's.
-        awk 'NR==FNR{member[$0];next} ($0 in member)' \
-          "$WORK/subtree-sorted.txt" "$WORK/ordered-keys.txt" >"$WORK/result-keys.txt"
-        total="$(grep -c '^[A-Z0-9]\{8\}$' "$WORK/result-keys.txt" || true)"
-        sed -n "$((SKIP + 1)),$((SKIP + LIMIT))p" "$WORK/result-keys.txt" >"$WORK/page-keys.txt"
-        count="$(grep -c '^[A-Z0-9]\{8\}$' "$WORK/page-keys.txt" || true)"
-        : >"$WORK/items.jsonl"
-        if ((count > 0)); then
-            page_keys="$(tr '\n' ',' <"$WORK/page-keys.txt" | sed 's/,$//')"
-            metadata "items?itemKey=$page_keys&limit=$LIMIT" "$WORK/items.json"
-            "$JQ" -e 'type=="array"' "$WORK/items.json" >/dev/null || fail zotero_error "Invalid item list."
-            "$JQ" -Rs '[split("\n")[]|select(length>0)]' "$WORK/page-keys.txt" >"$WORK/page-keys.json"
-            # itemKey responses are not ordered by the request, so restore the
-            # page's own ordering before rendering.
-            "$JQ" -c --slurpfile order "$WORK/page-keys.json" '
-              (reduce .[] as $item ({}; .[$item.data.key] = $item)) as $by_key
-              | $order[0] | map($by_key[.]) | map(select(. != null))
-              | .[] | select(.data.itemType != "attachment" and .data.itemType != "note"
-                             and .data.itemType != "annotation")
-              | {key:.data.key,title:.data.title,date:.data.date,numChildren:(.meta.numChildren // 0)}' \
-              "$WORK/items.json" >"$WORK/items.jsonl"
-        fi
-    else
-        metadata "$base_path?limit=$LIMIT&start=$SKIP&$item_filter&sort=dateModified&direction=desc" "$WORK/items.json"
-        "$JQ" -e 'type=="array"' "$WORK/items.json" >/dev/null || fail zotero_error "Invalid item list."
-        total_results
-        total=$TOTAL_RESULTS
-        count="$("$JQ" 'length' "$WORK/items.json")"
-        ((count <= LIMIT)) || fail zotero_error "Zotero returned an oversized page."
-        "$JQ" -c '.[]|select(.data.itemType!="attachment" and .data.itemType!="note" and .data.itemType!="annotation")
-          |{key:.data.key,title:.data.title,date:.data.date,numChildren:(.meta.numChildren // 0)}' \
-          "$WORK/items.json" >"$WORK/items.jsonl"
-    fi
+    metadata "$base_path?limit=$LIMIT&start=$SKIP&q=$encoded_query&itemType=-attachment%20%7C%7C%20note%20%7C%7C%20annotation&sort=dateModified&direction=desc$tag_parameter" "$WORK/items.json"
+    "$JQ" -e 'type=="array"' "$WORK/items.json" >/dev/null || fail zotero_error "Invalid item list."
+    total_results
+    total=$TOTAL_RESULTS
+    count="$("$JQ" 'length' "$WORK/items.json")"
+    ((count <= LIMIT)) || fail zotero_error "Zotero returned an oversized page."
+    "$JQ" -c '.[]|select(.data.itemType!="attachment" and .data.itemType!="note" and .data.itemType!="annotation")
+      |{key:.data.key,title:.data.title,date:.data.date,numChildren:(.meta.numChildren // 0)}' \
+      "$WORK/items.json" >"$WORK/items.jsonl"
     next_skip=null
     if ((SKIP + count < total)); then
         ((count > 0)) || fail zotero_error "Zotero returned an empty page before the end; refresh the listing."
@@ -786,55 +699,6 @@ fetch_collection_index() {
         ((count > 0)) || fail zotero_error "Zotero returned an empty collection page before the end; retry."
     done
     "$JQ" -s 'sort_by(.name)' "$WORK/collections.jsonl" >"$WORK/collection-names.json"
-}
-# Loads the collection index for subtree expansion. Unlike
-# list_zotero_collections this never takes the state write lock, so it reuses
-# a cached index when one is present and otherwise fetches without caching.
-load_collection_index() {
-    if "$JQ" -e --arg scope "$LIBRARY_SCOPE" \
-      '.collection_cache[$scope].collections_version == 3' "$WORK/state.json" >/dev/null 2>&1; then
-        "$JQ" --arg scope "$LIBRARY_SCOPE" \
-          '.collection_cache[$scope].collections' "$WORK/state.json" >"$WORK/collection-names.json"
-        return
-    fi
-    fetch_collection_index
-}
-# Emits the selected collection key followed by every descendant key, so a
-# parent listing can include items filed only in its subcollections.
-collection_subtree() {
-    "$JQ" -r --arg root "$1" '
-      map({key:.key,parent:.parent}) as $all
-      | ($all|map(.key)) as $live
-      | ($all|map(.parent as $p
-                  | if ($p|length) > 0 and (($live|index($p)) == null)
-                    then .parent = "" else . end)) as $norm
-      | def children($p): $norm | map(select(.parent == $p) | .key);
-        def descend($frontier; $seen):
-          if ($frontier|length) == 0 then $seen
-          else ([$frontier[] | children(.)] | flatten
-                | map(. as $k | select(($seen|index($k)) == null)) | unique) as $next
-               | descend($next; $seen + $next)
-          end;
-        descend([$root]; [$root]) | .[]' "$WORK/collection-names.json"
-}
-# Persists freshly fetched collection membership. Uses the non-fatal lock so a
-# concurrent operation costs a cache write, not the listing itself. Entries
-# older than a day are pruned so the state file cannot grow without bound.
-cache_collection_members() {
-    try_lock_state || return 0
-    load_state
-    "$JQ" -s '.' "$WORK/fetched-members.jsonl" >"$WORK/fetched-members.json"
-    "$JQ" --arg scope "$LIBRARY_SCOPE" --argjson now "$now_epoch" \
-      --slurpfile entries "$WORK/fetched-members.json" '
-      (.collection_member_cache // {}) as $cache
-      | .collection_member_cache = $cache
-      | .collection_member_cache[$scope] = ((.collection_member_cache[$scope] // {})
-          | with_entries(select((.value.fetched_at // 0) > ($now - 86400))))
-      | reduce $entries[0][] as $entry (.;
-          .collection_member_cache[$scope][$entry.key] = $entry.entry)' \
-      "$WORK/state.json" >"$WORK/state-next.json"
-    save_state
-    exec {json_lock}>&-
 }
 list_zotero_collections() {
     lock_state
