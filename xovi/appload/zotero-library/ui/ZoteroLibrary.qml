@@ -6,7 +6,7 @@ import net.asivery.CommandExecutor 1.0
 Rectangle {
     id: app
     anchors.fill: parent
-    color: "#f7f7f7"
+    color: "white"
 
     signal close
     function unloading() {}
@@ -866,113 +866,118 @@ Rectangle {
             }
         }
 
-        Rectangle {
-            visible: app.selectedCount > 0
+        // The space is reserved whether or not anything is selected, so the
+        // bar appearing never shifts the list below it.
+        Item {
             width: parent.width
-            height: visible ? 64 : 0
-            color: "white"
-            border.width: 1
-            border.color: "black"
-            Row {
+            height: 64
+            Rectangle {
+                visible: app.selectedCount > 0
                 anchors.fill: parent
-                anchors.margins: 8
-                spacing: 16
-                Text {
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: app.selectedCount + " selected"
-                    color: "black"
-                    font.pixelSize: 20
-                }
+                color: "white"
+                border.width: 1
+                border.color: "black"
                 Row {
-                    spacing: 4
-                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.fill: parent
+                    anchors.margins: 8
+                    spacing: 16
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: app.selectedCount + " selected"
+                        color: "black"
+                        font.pixelSize: 20
+                    }
+                    Row {
+                        spacing: 4
+                        anchors.verticalCenter: parent.verticalCenter
+                        Rectangle {
+                            width: 26
+                            height: 26
+                            border.width: 2
+                            border.color: "black"
+                            color: app.batchIncludeZoteroTags ? "black" : "white"
+                            Text {
+                                anchors.centerIn: parent
+                                text: app.batchIncludeZoteroTags ? "✓" : ""
+                                color: "white"
+                                font.pixelSize: 18
+                                font.bold: true
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                onClicked: app.batchIncludeZoteroTags = !app.batchIncludeZoteroTags
+                            }
+                        }
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "Zotero tags"
+                            color: "black"
+                            font.pixelSize: 16
+                        }
+                    }
+                    Row {
+                        spacing: 4
+                        anchors.verticalCenter: parent.verticalCenter
+                        Rectangle {
+                            width: 26
+                            height: 26
+                            border.width: 2
+                            border.color: "black"
+                            color: app.batchAddUnreadTag ? "black" : "white"
+                            Text {
+                                anchors.centerIn: parent
+                                text: app.batchAddUnreadTag ? "✓" : ""
+                                color: "white"
+                                font.pixelSize: 18
+                                font.bold: true
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                onClicked: app.batchAddUnreadTag = !app.batchAddUnreadTag
+                            }
+                        }
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "Unread"
+                            color: "black"
+                            font.pixelSize: 16
+                        }
+                    }
                     Rectangle {
-                        width: 26
-                        height: 26
-                        border.width: 2
-                        border.color: "black"
-                        color: app.batchIncludeZoteroTags ? "black" : "white"
+                        width: 130
+                        height: 44
+                        anchors.verticalCenter: parent.verticalCenter
+                        color: "black"
                         Text {
                             anchors.centerIn: parent
-                            text: app.batchIncludeZoteroTags ? "✓" : ""
+                            text: app.downloadQueueTotal > 0 ?
+                                  "Downloading " + app.downloadQueueDone + "/" + app.downloadQueueTotal :
+                                  "Download"
                             color: "white"
-                            font.pixelSize: 18
-                            font.bold: true
+                            font.pixelSize: 16
                         }
                         MouseArea {
                             anchors.fill: parent
-                            onClicked: app.batchIncludeZoteroTags = !app.batchIncludeZoteroTags
+                            enabled: !app.busy
+                            onClicked: app.startBatchDownload()
                         }
                     }
-                    Text {
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: "Zotero tags"
-                        color: "black"
-                        font.pixelSize: 16
-                    }
-                }
-                Row {
-                    spacing: 4
-                    anchors.verticalCenter: parent.verticalCenter
                     Rectangle {
-                        width: 26
-                        height: 26
-                        border.width: 2
-                        border.color: "black"
-                        color: app.batchAddUnreadTag ? "black" : "white"
+                        width: 90
+                        height: 44
+                        anchors.verticalCenter: parent.verticalCenter
+                        color: "black"
                         Text {
                             anchors.centerIn: parent
-                            text: app.batchAddUnreadTag ? "✓" : ""
+                            text: "Cancel"
                             color: "white"
-                            font.pixelSize: 18
-                            font.bold: true
+                            font.pixelSize: 16
                         }
                         MouseArea {
                             anchors.fill: parent
-                            onClicked: app.batchAddUnreadTag = !app.batchAddUnreadTag
+                            enabled: app.downloadQueueTotal === 0
+                            onClicked: app.clearSelection()
                         }
-                    }
-                    Text {
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: "Unread"
-                        color: "black"
-                        font.pixelSize: 16
-                    }
-                }
-                Rectangle {
-                    width: 130
-                    height: 44
-                    anchors.verticalCenter: parent.verticalCenter
-                    color: "black"
-                    Text {
-                        anchors.centerIn: parent
-                        text: app.downloadQueueTotal > 0 ?
-                              "Downloading " + app.downloadQueueDone + "/" + app.downloadQueueTotal :
-                              "Download"
-                        color: "white"
-                        font.pixelSize: 16
-                    }
-                    MouseArea {
-                        anchors.fill: parent
-                        enabled: !app.busy
-                        onClicked: app.startBatchDownload()
-                    }
-                }
-                Rectangle {
-                    width: 90
-                    height: 44
-                    anchors.verticalCenter: parent.verticalCenter
-                    color: "black"
-                    Text {
-                        anchors.centerIn: parent
-                        text: "Cancel"
-                        color: "white"
-                        font.pixelSize: 16
-                    }
-                    MouseArea {
-                        anchors.fill: parent
-                        enabled: app.downloadQueueTotal === 0
-                        onClicked: app.clearSelection()
                     }
                 }
             }
@@ -1117,8 +1122,8 @@ Rectangle {
                             height: 128 + (remarkablePath ? 28 : 0) +
                                     (uiState.children !== null && uiState.expanded ?
                                      (24 + Math.max(uiState.children.length, 1) * 56) : 0)
-                            color: index === app.activeIndex ? "#dddddd" : "white"
-                            border.width: 1
+                            color: "white"
+                            border.width: index === app.activeIndex ? 3 : 1
                             border.color: "#555555"
                             Column {
                                 anchors.fill: parent
