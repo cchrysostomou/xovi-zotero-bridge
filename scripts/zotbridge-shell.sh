@@ -20,6 +20,7 @@ WORK=
 WORKER=
 WORKER_IS_COMMAND=false
 STATE_STAGE=
+CONFIG_STAGE=
 ACTIVITY_LOG=
 ACTIVITY_READY=false
 ACTIVITY_LOGGED=false
@@ -29,7 +30,7 @@ STATE_LOADED=false
 
 activity_event() {
     local event=$1 error=${2:-} tag=${3:-} count=${4:-} item=${5:-${ITEM_KEY:-}}
-    local filename=${6:-} line= action=${ZOTBRIDGE_ACTIVITY_PARENT_ACTION:-$COMMAND}
+    local filename=${6:-} line= action=${ZOTBRIDGE_ACTIVITY_PARENT_ACTION:-${COMMAND:-startup}}
     [[ $ACTIVITY_READY == true && $COMMAND != activity-log && $COMMAND != clear-activity-log &&
        (${ZOTBRIDGE_ACTIVITY_CHILD:-false} != true || $event == hit || $event == failed) ]] || return 0
     command -v flock >/dev/null && command -v mv >/dev/null && command -v tail >/dev/null ||
@@ -88,6 +89,7 @@ cleanup() {
         wait "$WORKER" 2>/dev/null || :
     fi
     [[ -z $STATE_STAGE ]] || rm -f -- "$STATE_STAGE"
+    [[ -z $CONFIG_STAGE ]] || rm -f -- "$CONFIG_STAGE"
     [[ -z $WORK ]] || rm -rf -- "$WORK"
     :
 }
@@ -111,16 +113,6 @@ exec 2>/dev/null
 for dependency in wc mkdir chmod rm dirname; do
     command -v "$dependency" >/dev/null || fail missing_dependency "Required utility missing: $dependency."
 done
-if [[ -n ${ZOTBRIDGE_CURL:-} ]]; then
-    [[ -x $ZOTBRIDGE_CURL ]] ||
-        fail missing_dependency "ZOTBRIDGE_CURL must name an executable curl binary."
-    CURL=$ZOTBRIDGE_CURL
-elif [[ -x /home/root/.vellum/bin/curl ]]; then
-    CURL=/home/root/.vellum/bin/curl
-else
-    CURL="$(command -v curl)" || fail missing_dependency "Install curl (including TLS support), or make /home/root/.vellum/bin/curl executable."
-fi
-
 if [[ ${1:-} == --help || ${1:-} == -h || $# == 0 ]]; then
     printf '%s\n' 'Usage: zotbridge-run.sh list [--query TEXT] [--tag NAME ...] [--collection KEY] [--limit 1..100] [--skip N] [--json] [--page-info]' \
       '                        [--sort title|creator|dateAdded|dateModified] [--direction asc|desc] [--refresh]' \
@@ -278,7 +270,8 @@ fi
 
 CONFIG="${ZOTBRIDGE_CONFIG:-$ROOT_DIR/config.toml}"
 [[ $CONFIG != "~/"* ]] || CONFIG="$HOME/${CONFIG:2}"
-[[ -f $CONFIG ]] || fail FileNotFoundError "Missing configuration. Copy config.example.toml to config.toml and configure it."
+[[ ! -L $CONFIG && ( ! -e $CONFIG || -f $CONFIG ) ]] ||
+    fail configuration_error "Configuration must be a regular file, not a symbolic link."
 CONFIG_DIR="$(CDPATH= cd -- "$(dirname -- "$CONFIG")" && pwd)"
 [[ $CONFIG == /* ]] || CONFIG="$PWD/$CONFIG"
 WORK_BASE="${ZOTBRIDGE_WORK_DIR:-$ROOT_DIR}"
@@ -289,8 +282,87 @@ for ((attempt=0; attempt<10; attempt++)); do
     if mkdir -m 700 -- "$candidate"; then WORK=$candidate; break; fi
 done
 [[ -n $WORK ]] || fail runtime_error "Cannot create a private working directory."
-"$JQ" -Rse -f "$ROOT_DIR/scripts/zotbridge-shell-config.jq" "$CONFIG" >"$WORK/config.json" ||
-    fail configuration_error "Invalid configuration. Shell backend supports flat keys with JSON-compatible quoted strings, numbers and booleans; no tables, literal/multiline strings or duplicate keys. Check required values and limits."
+read_config() {
+    local input=$1 mode=$2 destination=$3 error_kind=${4:-configuration_error}
+    "$JQ" -Rs --arg config_mode "$mode" -f "$ROOT_DIR/scripts/zotbridge-shell-config.jq" \
+      "$input" >"$WORK/config-report.json" ||
+        fail "$error_kind" "Cannot read configuration. Check file permissions and configuration syntax."
+    if ! "$JQ" -e '.ok' "$WORK/config-report.json" >/dev/null; then
+        fail "$error_kind" "$("$JQ" -r '.message' "$WORK/config-report.json")"
+    fi
+    "$JQ" '.config' "$WORK/config-report.json" >"$destination"
+    CONFIGURED="$("$JQ" -r '.configured' "$WORK/config-report.json")"
+    CONFIG_MESSAGE="$("$JQ" -r '.message // ""' "$WORK/config-report.json")"
+}
+show_settings() {
+    "$JQ" --arg mode public --argjson draft '[]' --argjson configured "$CONFIGURED" \
+      --arg configuration_message "$CONFIG_MESSAGE" \
+      -cf "$ROOT_DIR/scripts/zotbridge-shell-settings.jq" "$WORK/config.json"
+}
+apply_settings() {
+    local draft="$CONFIG_DIR/.zotbridge-settings-draft.json" stage
+    [[ ! -L $draft && -f $draft ]] ||
+        fail settings_error "Missing settings draft or unsafe draft path. Save settings from the Settings page."
+    chmod 600 "$draft"
+    "$JQ" -se 'if length==1 and (.[0]|type=="object") then .[0]
+      else error("invalid draft") end' "$draft" >"$WORK/settings-draft.json" ||
+        fail settings_error "Settings draft must contain one JSON object."
+    command -v flock >/dev/null && command -v mv >/dev/null ||
+        fail missing_dependency "Saving settings requires flock and mv."
+    exec {config_lock}>>"$CONFIG.lock"
+    flock -n "$config_lock" || fail busy "Another operation is updating configuration; try later."
+    [[ ! -L $CONFIG && ( ! -e $CONFIG || -f $CONFIG ) ]] ||
+        fail settings_error "Configuration must be a regular file, not a symbolic link."
+    if [[ -f $CONFIG ]]; then
+        read_config "$CONFIG" setup-report "$WORK/config.json" settings_error
+    else
+        read_config "$WORK/initial.toml" setup-report "$WORK/config.json" settings_error
+    fi
+    "$JQ" --arg mode apply --slurpfile draft "$WORK/settings-draft.json" \
+      -f "$ROOT_DIR/scripts/zotbridge-shell-settings.jq" "$WORK/config.json" >"$WORK/settings-report.json" ||
+        fail settings_error "Cannot validate settings draft."
+    if ! "$JQ" -e '.ok' "$WORK/settings-report.json" >/dev/null; then
+        fail settings_error "$("$JQ" -r '.message' "$WORK/settings-report.json")"
+    fi
+    "$JQ" '.config' "$WORK/settings-report.json" >"$WORK/config-next.json"
+    "$JQ" --arg mode toml --argjson draft '[]' -rf "$ROOT_DIR/scripts/zotbridge-shell-settings.jq" \
+      "$WORK/config-next.json" >"$WORK/config-next.toml" ||
+        fail settings_error "Cannot render updated configuration."
+    read_config "$WORK/config-next.toml" report "$WORK/config.json" settings_error
+    stage="$CONFIG.new.$$.$RANDOM"
+    (set -o noclobber; : >"$stage") || fail settings_error "Cannot stage updated configuration."
+    CONFIG_STAGE=$stage
+    chmod 600 "$CONFIG_STAGE"
+    cat "$WORK/config-next.toml" >"$CONFIG_STAGE" || fail settings_error "Cannot write updated configuration."
+    mv -f -- "$CONFIG_STAGE" "$CONFIG"
+    CONFIG_STAGE=
+    rm -f -- "$draft"
+    exec {config_lock}>&-
+    ACTIVITY_LOGGED=true
+    show_settings | "$JQ" -c '. + {applied:true}'
+}
+if [[ $COMMAND == settings || $COMMAND == settings-apply ]]; then
+    CONFIG_INPUT=$CONFIG
+    if [[ ! -e $CONFIG ]]; then
+        printf '%s\n' 'library_type = "user"' >"$WORK/initial.toml"
+        CONFIG_INPUT="$WORK/initial.toml"
+    fi
+    read_config "$CONFIG_INPUT" setup-report "$WORK/config.json"
+    ACTIVITY_LOGGED=true
+    if [[ $COMMAND == settings ]]; then show_settings; else apply_settings; fi
+    exit 0
+fi
+[[ -f $CONFIG ]] || fail configuration_error "Setup required. Open Settings > Zotero Bridge and save your Zotero credentials."
+read_config "$CONFIG" report "$WORK/config.json"
+if [[ -n ${ZOTBRIDGE_CURL:-} ]]; then
+    [[ -x $ZOTBRIDGE_CURL ]] ||
+        fail missing_dependency "ZOTBRIDGE_CURL must name an executable curl binary."
+    CURL=$ZOTBRIDGE_CURL
+elif [[ -x /home/root/.vellum/bin/curl ]]; then
+    CURL=/home/root/.vellum/bin/curl
+else
+    CURL="$(command -v curl)" || fail missing_dependency "Install curl (including TLS support), or make /home/root/.vellum/bin/curl executable."
+fi
 get_config() { "$JQ" -r ".$1" "$WORK/config.json"; }
 # jq recompiles its program text on every invocation, which costs several times
 # more than reading one value, so every startup setting is emitted as a quoted
@@ -483,34 +555,6 @@ clear_activity_log() {
     exec {activity_lock}>&-
     ACTIVITY_LOGGED=true
     "$JQ" -cn --argjson cleared "$cleared" '{ok:true,cleared:$cleared}'
-}
-show_settings() {
-    "$JQ" --arg mode public --argjson draft '[]' -cf "$ROOT_DIR/scripts/zotbridge-shell-settings.jq" "$WORK/config.json"
-}
-apply_settings() {
-    local draft="$CONFIG_DIR/.zotbridge-settings-draft.json" stage=
-    [[ ! -L $CONFIG && ! -L $draft ]] || fail settings_error "Configuration and settings draft must not be symbolic links."
-    [[ -f $draft ]] || fail FileNotFoundError "Missing settings draft. Save settings from the Settings page first."
-    "$JQ" -se 'if length==1 and (.[0]|type=="object") then .[0]
-      else error("invalid draft") end' "$draft" >"$WORK/settings-draft.json" ||
-      fail settings_error "Settings draft must contain one JSON object."
-    exec {config_lock}>>"$CONFIG.lock"
-    flock -n "$config_lock" || fail busy "Another operation is updating configuration; try later."
-    "$JQ" --arg mode apply --slurpfile draft "$WORK/settings-draft.json" -f "$ROOT_DIR/scripts/zotbridge-shell-settings.jq" \
-      "$WORK/config.json" >"$WORK/config-next.json" ||
-      fail settings_error "Invalid settings draft. WebDAV must use HTTPS; tags and folder path must be valid."
-    "$JQ" --arg mode toml --argjson draft '[]' -rf "$ROOT_DIR/scripts/zotbridge-shell-settings.jq" "$WORK/config-next.json" >"$WORK/config-next.toml" ||
-      fail settings_error "Cannot render updated configuration."
-    stage="$CONFIG.new.$$.$RANDOM"
-    (set -o noclobber; : >"$stage") || fail settings_error "Cannot stage updated configuration."
-    chmod 600 "$stage"
-    cat "$WORK/config-next.toml" >"$stage" || fail settings_error "Cannot write updated configuration."
-    mv -f -- "$stage" "$CONFIG"
-    rm -f -- "$draft"
-    exec {config_lock}>&-
-    ACTIVITY_LOGGED=true
-    "$JQ" --arg mode public --argjson draft '[]' -cf "$ROOT_DIR/scripts/zotbridge-shell-settings.jq" "$WORK/config-next.json" |
-      "$JQ" -c '. + {applied:true}'
 }
 
 # Bash's file-size resource limit is enforced even for chunked HTTP responses or
