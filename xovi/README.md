@@ -99,12 +99,12 @@ the other two 3.28 QMD patches, and copies its glyph icon
 (`xovi/assets/zotero-send-icon.png`, a plain "Z" glyph, not a native firmware
 icon resource) to `/home/root/xovi-zotero-bridge/assets/`.
 
-This patch has **not** been validated on-device yet. Its toolbar/menu insertion
+The maintainer confirmed on 2026-10-04 that the current repository version of
+this patch works on their device. This does not establish coverage of every
+send mode, error case, device or firmware build. Its toolbar/menu insertion
 points and native property tokens are copied from the community-published
-`touchLock.qmd` (matching this firmware build), but the button and dialog
-behavior themselves are new and should be tested carefully — ideally with a way
-to revert (remove the file and restart XOVI) if the reader toolbar or menus
-misbehave.
+`touchLock.qmd` (matching this firmware build). If the reader toolbar or menus
+misbehave, remove `zoteroSendToZotero.qmd` and restart XOVI.
 
 The displayed Quick Settings icon is a circular **Z** badge. It inverts while the operation runs,
 and cannot be tapped again during that time. Xochitl's logging feedback reports

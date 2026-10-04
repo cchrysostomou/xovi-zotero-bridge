@@ -86,6 +86,7 @@ $zip = New-Object System.IO.Compression.ZipArchive($stream, [System.IO.Compressi
 $encoding = New-Object System.Text.UTF8Encoding($false)
 try {
     $files = @(
+        @{ Path = (Join-Path $root "LICENSE"); Name = "LICENSE"; Binary = $false }
         @{ Path = (Join-Path $root "README.md"); Name = "README.md"; Binary = $false }
         @{ Path = (Join-Path $root "config.example.toml"); Name = "config.example.toml"; Binary = $false }
         @{ Path = $jq; Name = "bin/jq"; Binary = $true }

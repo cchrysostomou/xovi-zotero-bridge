@@ -174,9 +174,12 @@ assert.match(status, /integer/);
         package = ROOT / "dist" / "xovi-zotero-quick-settings-qmd.zip"
         with zipfile.ZipFile(package) as archive:
             self.assertEqual(set(archive.namelist()), {
+                "LICENSE",
                 "README.md", "3.27/zoteroQuickSync.qmd", "3.28/zoteroQuickSync.qmd",
                 "3.28/zoteroBridgeSettings.qmd", "3.28/zoteroSendToZotero.qmd",
             })
+            self.assertEqual(archive.read("LICENSE").decode("utf-8"),
+                             (ROOT / "LICENSE").read_text(encoding="utf-8"))
             for name in archive.namelist():
                 self.assertNotIn("\r", archive.read(name).decode("utf-8"))
             self.assertNotIn("config.toml", archive.namelist())
@@ -221,10 +224,13 @@ assert.match(status, /integer/);
         package = ROOT / "dist" / "xovi-zotero-appload-app.zip"
         with zipfile.ZipFile(package) as archive:
             self.assertEqual(set(archive.namelist()), {
+                "zotero-library/LICENSE",
                 "zotero-library/manifest.json",
                 "zotero-library/icon.png",
                 "zotero-library/resources.rcc",
             })
+            self.assertEqual(archive.read("zotero-library/LICENSE").decode("utf-8"),
+                             (ROOT / "LICENSE").read_text(encoding="utf-8"))
             self.assertGreater(len(archive.read("zotero-library/resources.rcc")), 1000)
             self.assertNotIn("config.toml", archive.namelist())
 

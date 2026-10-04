@@ -7,6 +7,7 @@ name = "xovi-zotero-bridge"
 version = "0.1.0"
 description = "On-demand Zotero to reMarkable bridge for xovi/rm-librarian"
 readme = "README.md"
+license = {text = "MIT"}
 requires-python = ">=3.12"
 dependencies = [
   "pyzotero>=1.15.1,<2",
