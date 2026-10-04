@@ -1,5 +1,16 @@
 # xovi integration notes
 
+## First-run configuration
+
+After installation and the normal XOVI restart, open **Settings > Zotero Bridge**.
+The page works without an existing configuration. Enter the Zotero library ID,
+select personal/group, and enter an API key in the masked field. Choose Zotero
+Storage or WebDAV; WebDAV is personal-library-only and requires an HTTPS URL,
+username and password. Save creates the config offline. Test connection checks
+the saved Zotero settings and the WebDAV directory when selected, not PDF access.
+Blank replacement secret fields preserve stored credentials. Errors identify
+the invalid field or configuration line without displaying secret values.
+
 The UI has three independent pieces:
 
 - a **Zotero Quick Settings action** for one-tap bidirectional sync
@@ -124,7 +135,8 @@ the bridge runtime, installs both 3.28 QMD files in
 neither `config.toml` nor bridge state, so those files are not overwritten.
 Restart XOVI afterward to load the QMD changes and AppLoad's app list.
 
-The 3.28 Settings app sidebar gains **Zotero Bridge**. It edits the WebDAV URL,
+The 3.28 Settings app sidebar gains **Zotero Bridge**. It creates or edits the
+Zotero library ID/type, masked API key replacement, attachment storage choice, WebDAV URL,
 username, password replacement, default reMarkable folder, and queue/completion
 tags. There is no reMarkable Cloud pairing step: reverse synchronization reads
 directly from the on-device xochitl library and merges annotations locally with
@@ -133,20 +145,21 @@ is ever needed.
 The **reMarkable source folder** setting defaults to `Zotero/Read` and will be
 used by reverse synchronization.
 
-The stored WebDAV password is never returned to QML: the page shows only its
-presence and an empty password field preserves it. Refresh tags and refresh-log
+The stored API key and WebDAV password are never returned to QML: the page shows only their
+presence and empty replacement fields preserve them. Refresh tags and refresh-log
 buttons call the bridge asynchronously and display their JSON results. The
 activity section provides **Refresh log** and **Clear log** controls; clearing
 also immediately empties the displayed event list.
 
-The Settings page loads cached tags on entry and provides **Refresh tags** for the
+Once configured, the Settings page loads cached tags on entry and provides **Refresh tags** for the
 explicit live refresh. All available Zotero tags appear in a bounded, scrollable
 panel below it; use the horizontally-scrollable **All**, **#**, or **A–Z** filter
 buttons to narrow that display. Queue and completion tags are chosen from
 scrollable, searchable tag pickers rather than freeform entries; save is rejected
 if they are identical.
-**Test Zotero connection** makes read-only Zotero metadata and WebDAV directory
-requests. It does not download a PDF, import a document, or modify Zotero/WebDAV.
+**Test Zotero connection** uses saved settings and makes read-only Zotero metadata
+requests, plus WebDAV directory requests only when WebDAV is selected.
+It does not download a PDF, import a document, or modify Zotero/WebDAV.
 
 The Quick Settings backend entry point is:
 

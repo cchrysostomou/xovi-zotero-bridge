@@ -62,6 +62,9 @@ AFFECT [[12599552112012170435]]
                     property string pendingKind: ""
                     property string commandError: ""
                     property bool busy: false
+                    property bool configured: false
+                    property bool useWebdav: false
+                    property string libraryType: "user"
 
                     function filteredTags() {
                         var query = openTagPicker === "queue" ? queueInput.text : syncedInput.text;
@@ -149,6 +152,8 @@ AFFECT [[12599552112012170435]]
                     }
 
                     function dismissKeyboard() {
+                        libraryIdInput.focus = false;
+                        apiKeyInput.focus = false;
                         urlInput.focus = false;
                         usernameInput.focus = false;
                         passwordInput.focus = false;
@@ -217,15 +222,23 @@ AFFECT [[12599552112012170435]]
                             return;
                         }
                         if (settingsCommand.exitCode !== 0 || result.ok !== true) {
-                            status = "Bridge error: " + (result.error ||
+                            status = "Bridge error: " + (result.message || result.error ||
                                 "command exited " + settingsCommand.exitCode);
                             return;
                         }
                         if (result.metadata) {
-                            status = result.metadata === "accessible" && result.webdav === "accessible" ?
-                                "Zotero API and WebDAV are reachable" : "Connection test incomplete";
+                            status = result.metadata !== "accessible" ? "Connection test incomplete" :
+                                (result.webdav === "accessible" ? "Zotero API and WebDAV are reachable" :
+                                "Zotero API is reachable; PDF access has not been tested");
                         } else if (result.webdav && typeof result.webdav === "object") {
                             settings = result;
+                            configured = result.configured === true;
+                            useWebdav = result.webdav.enabled === true;
+                            libraryType = result.zotero.library_type || "user";
+                            libraryIdInput.text = result.zotero.library_id || "";
+                            apiKeyInput.text = "";
+                            apiKeyHint.text = result.zotero.api_key_set ?
+                                "API key stored; leave blank to keep it" : "Enter a Zotero API key";
                             urlInput.text = result.webdav.url || "";
                             usernameInput.text = result.webdav.username || "";
                             passwordInput.text = "";
@@ -236,8 +249,10 @@ AFFECT [[12599552112012170435]]
                             listPageLimitInput.text = String(result.list_page_limit || 8);
                             passwordHint.text = result.webdav.password_set ?
                                 "Password stored; leave blank to keep it" : "No password stored";
-                            status = result.applied ? "Settings saved" : "Settings loaded";
-                            if (!result.applied) run(["tags", "--json"]);
+                            status = result.applied ? "Settings saved. Test the saved connection when online." :
+                                (configured ? "Settings loaded" :
+                                "Setup required. " + (result.configuration_message || "Enter your Zotero credentials and save."));
+                            if (!result.applied && configured) run(["tags", "--json"]);
                         } else if (result.entries) {
                             events = result.entries.slice().reverse();
                             status = "Loaded " + result.entries.length + " log events";
@@ -250,11 +265,17 @@ AFFECT [[12599552112012170435]]
                     }
 
                     function saveSettings() {
+                        if (busy) return;
                         var parsedLimit = parseInt(listPageLimitInput.text, 10);
-                        if (isNaN(parsedLimit)) parsedLimit = 8;
-                        parsedLimit = Math.max(1, Math.min(100, parsedLimit));
+                        if (!/^[0-9]+$/.test(listPageLimitInput.text) || parsedLimit < 1 || parsedLimit > 100) {
+                            status = "List page size must be an integer from 1 to 100";
+                            return;
+                        }
                         var draft = {
                             version: 1,
+                            library_id: libraryIdInput.text,
+                            library_type: libraryType,
+                            use_webdav: useWebdav,
                             webdav_url: urlInput.text,
                             webdav_username: usernameInput.text,
                             default_target_folder: folderInput.text,
@@ -263,11 +284,14 @@ AFFECT [[12599552112012170435]]
                             sync_synced_tag: syncedTag,
                             list_page_limit: parsedLimit
                         };
+                        if (apiKeyInput.text.length > 0) draft.api_key = apiKeyInput.text;
                         if (passwordInput.text.length > 0) draft.webdav_password = passwordInput.text;
+                        busy = true;
                         var request = new XMLHttpRequest();
                         request.open("PUT", "file:///home/root/xovi-zotero-bridge/.zotbridge-settings-draft.json");
                         request.onreadystatechange = function() {
                             if (request.readyState !== XMLHttpRequest.DONE) return;
+                            bridgeSettings.busy = false;
                             if (request.status !== 0 && (request.status < 200 || request.status >= 300)) {
                                 bridgeSettings.status = "Could not save settings draft";
                                 return;
@@ -275,6 +299,16 @@ AFFECT [[12599552112012170435]]
                             bridgeSettings.run(["settings-apply"]);
                         };
                         request.send(JSON.stringify(draft));
+                        apiKeyInput.text = "";
+                        passwordInput.text = "";
+                    }
+
+                    function testConnection() {
+                        if (!configured) {
+                            status = "Save your Zotero settings before testing the connection";
+                            return;
+                        }
+                        run(settings.webdav.enabled ? ["check-connection", "--webdav"] : ["check-connection"]);
                     }
 
                     Component.onCompleted: {
@@ -300,25 +334,74 @@ AFFECT [[12599552112012170435]]
 
                             Text { text: "Zotero Bridge"; font.pixelSize: 40; font.bold: true }
                             Text { text: bridgeSettings.status; font.pixelSize: 22; wrapMode: Text.WordWrap; width: parent.width }
-                            Text { text: "WebDAV storage"; font.pixelSize: 30; font.bold: true }
-                            Text { text: "Server URL (HTTPS)"; font.pixelSize: 22 }
+                            Text { text: "Zotero account"; font.pixelSize: 30; font.bold: true }
+                            Text { text: "Library ID (numeric user or group ID)"; font.pixelSize: 22 }
+                            TextInput { id: libraryIdInput; width: parent.width; font.pixelSize: 24; selectByMouse: true
+                                Keys.onReturnPressed: bridgeSettings.dismissKeyboard()
+                                Keys.onEnterPressed: bridgeSettings.dismissKeyboard()
+                            }
+                            Rectangle { width: parent.width; height: 2; color: "black" }
+                            Row {
+                                spacing: 16
+                                Repeater {
+                                    model: ["user", "group"]
+                                    delegate: Rectangle {
+                                        width: 220; height: 64; border.width: 2
+                                        color: bridgeSettings.libraryType === modelData ? "black" : "white"
+                                        Text { anchors.centerIn: parent; text: modelData === "user" ? "Personal library" : "Group library"
+                                            color: bridgeSettings.libraryType === modelData ? "white" : "black"; font.pixelSize: 22 }
+                                        MouseArea { anchors.fill: parent; enabled: !bridgeSettings.busy
+                                            onClicked: { bridgeSettings.libraryType = modelData; if (modelData === "group") bridgeSettings.useWebdav = false; } }
+                                    }
+                                }
+                            }
+                            Text { text: "API key (read access; write access required for sync)"; font.pixelSize: 22; width: parent.width; wrapMode: Text.WordWrap }
+                            TextInput { id: apiKeyInput; width: parent.width; font.pixelSize: 24; echoMode: TextInput.Password; selectByMouse: true
+                                Keys.onReturnPressed: bridgeSettings.dismissKeyboard()
+                                Keys.onEnterPressed: bridgeSettings.dismissKeyboard()
+                            }
+                            Text { id: apiKeyHint; font.pixelSize: 18 }
+                            Text { text: "Attachment storage"; font.pixelSize: 30; font.bold: true }
+                            Row {
+                                spacing: 16
+                                Repeater {
+                                    model: ["Zotero Storage", "WebDAV"]
+                                    delegate: Rectangle {
+                                        width: 260; height: 64; border.width: 2
+                                        color: bridgeSettings.useWebdav === (index === 1) ? "black" : "white"
+                                        Text { anchors.centerIn: parent; text: modelData
+                                            color: bridgeSettings.useWebdav === (index === 1) ? "white" : "black"; font.pixelSize: 22 }
+                                        MouseArea { anchors.fill: parent; enabled: !bridgeSettings.busy
+                                            onClicked: {
+                                                if (index === 1 && bridgeSettings.libraryType === "group")
+                                                    bridgeSettings.status = "WebDAV supports personal Zotero libraries only";
+                                                else bridgeSettings.useWebdav = index === 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Text { visible: bridgeSettings.useWebdav; text: "Server URL (HTTPS)"; font.pixelSize: 22 }
                             TextInput { id: urlInput; width: parent.width; font.pixelSize: 24; selectByMouse: true
+                                visible: bridgeSettings.useWebdav
                                 Keys.onReturnPressed: bridgeSettings.dismissKeyboard()
                                 Keys.onEnterPressed: bridgeSettings.dismissKeyboard()
                             }
                             Rectangle { width: parent.width; height: 2; color: "black" }
-                            Text { text: "Username"; font.pixelSize: 22 }
+                            Text { visible: bridgeSettings.useWebdav; text: "Username"; font.pixelSize: 22 }
                             TextInput { id: usernameInput; width: parent.width; font.pixelSize: 24; selectByMouse: true
+                                visible: bridgeSettings.useWebdav
                                 Keys.onReturnPressed: bridgeSettings.dismissKeyboard()
                                 Keys.onEnterPressed: bridgeSettings.dismissKeyboard()
                             }
                             Rectangle { width: parent.width; height: 2; color: "black" }
-                            Text { text: "Password"; font.pixelSize: 22 }
+                            Text { visible: bridgeSettings.useWebdav; text: "Password"; font.pixelSize: 22 }
                             TextInput { id: passwordInput; width: parent.width; font.pixelSize: 24; echoMode: TextInput.Password; selectByMouse: true
+                                visible: bridgeSettings.useWebdav
                                 Keys.onReturnPressed: bridgeSettings.dismissKeyboard()
                                 Keys.onEnterPressed: bridgeSettings.dismissKeyboard()
                             }
-                            Text { id: passwordHint; font.pixelSize: 18 }
+                            Text { id: passwordHint; visible: bridgeSettings.useWebdav; font.pixelSize: 18 }
                             Text { text: "reMarkable folder path"; font.pixelSize: 22 }
                             TextInput { id: folderInput; width: parent.width; font.pixelSize: 24; selectByMouse: true
                                 Keys.onReturnPressed: bridgeSettings.dismissKeyboard()
@@ -419,11 +502,12 @@ AFFECT [[12599552112012170435]]
                                     MouseArea { anchors.fill: parent; enabled: !bridgeSettings.busy; onClicked: bridgeSettings.saveSettings() }
                                 }
                                 Rectangle {
-                                    width: 360; height: 64; color: bridgeSettings.busy ? "#aaaaaa" : "black"
+                                    width: 360; height: 64; color: bridgeSettings.busy || !bridgeSettings.configured ? "#aaaaaa" : "black"
                                     Text { anchors.centerIn: parent; text: "Test Zotero connection"; color: "white"; font.pixelSize: 24 }
-                                    MouseArea { anchors.fill: parent; enabled: !bridgeSettings.busy; onClicked: bridgeSettings.run(["check-connection", "--webdav"]) }
+                                    MouseArea { anchors.fill: parent; enabled: !bridgeSettings.busy && bridgeSettings.configured; onClicked: bridgeSettings.testConnection() }
                                 }
                             }
+                            Text { text: "Connection tests use saved settings. Save changes first; saving works offline."; font.pixelSize: 18; width: parent.width; wrapMode: Text.WordWrap }
                             Text { text: "Sync to Zotero from reMarkable Cloud"; font.pixelSize: 30; font.bold: true }
                             Text { text: "reMarkable source folder"; font.pixelSize: 22 }
                             TextInput {
@@ -440,7 +524,7 @@ AFFECT [[12599552112012170435]]
                                 Rectangle {
                                     width: 260; height: 64; color: bridgeSettings.busy ? "#aaaaaa" : "black"
                                     Text { anchors.centerIn: parent; text: "Refresh tags"; color: "white"; font.pixelSize: 24 }
-                                    MouseArea { anchors.fill: parent; enabled: !bridgeSettings.busy; onClicked: bridgeSettings.run(["tags", "--refresh", "--json"]) }
+                                    MouseArea { anchors.fill: parent; enabled: !bridgeSettings.busy && bridgeSettings.configured; onClicked: bridgeSettings.run(["tags", "--refresh", "--json"]) }
                                 }
                                 Rectangle {
                                     width: 220; height: 64; color: "black"
@@ -514,7 +598,7 @@ AFFECT [[12599552112012170435]]
                                 Rectangle {
                                     width: 300; height: 64; color: bridgeSettings.busy ? "#aaaaaa" : "black"
                                     Text { anchors.centerIn: parent; text: "Refresh collections"; color: "white"; font.pixelSize: 24 }
-                                    MouseArea { anchors.fill: parent; enabled: !bridgeSettings.busy; onClicked: bridgeSettings.run(["collections", "--refresh", "--json"]) }
+                                    MouseArea { anchors.fill: parent; enabled: !bridgeSettings.busy && bridgeSettings.configured; onClicked: bridgeSettings.run(["collections", "--refresh", "--json"]) }
                                 }
                                 Rectangle {
                                     width: 260; height: 64; color: "black"

@@ -680,9 +680,14 @@ Rectangle {
             return;
         }
         if (pendingAction === "settings") {
-            if (bridgeCommand.exitCode !== 0) {
-                status = "Bridge error loading settings";
-                appendLog("✕ [settings] exit " + bridgeCommand.exitCode);
+            if (bridgeCommand.exitCode !== 0 || result.ok !== true) {
+                status = "Bridge error: " + (result.message || result.error || "Could not load settings");
+                appendLog("✕ [settings] " + status);
+                return;
+            }
+            if (result.configured === false) {
+                status = "Setup required. Open Settings > Zotero Bridge to save your Zotero credentials.";
+                appendLog(status);
                 return;
             }
             appendLog("✓ [settings] loaded");
@@ -692,8 +697,8 @@ Rectangle {
             return;
         }
         if (bridgeCommand.exitCode !== 0 || result.ok !== true) {
-            status = "Bridge error: " + (result.error || "command exited " + bridgeCommand.exitCode);
-            appendLog("✕ [" + pendingAction + "] " + (result.error || "exit " + bridgeCommand.exitCode));
+            status = "Bridge error: " + (result.message || result.error || "command exited " + bridgeCommand.exitCode);
+            appendLog("✕ [" + pendingAction + "] " + (result.message || result.error || "exit " + bridgeCommand.exitCode));
             clearPendingChildrenFetch();
             abortBatchDownload();
             return;

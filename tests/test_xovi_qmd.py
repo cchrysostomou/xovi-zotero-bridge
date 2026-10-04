@@ -1,5 +1,7 @@
 from pathlib import Path
 import os
+import re
+import shutil
 import subprocess
 import unittest
 import zipfile
@@ -20,6 +22,128 @@ def run_powershell_script(script):
 
 
 class ZoteroQuickSyncQmdTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "AppLoad JavaScript test requires Node.js")
+    def test_appload_stops_loading_until_first_run_setup_is_saved(self):
+        content = (ROOT / "xovi" / "appload" / "zotero-library" / "ui" /
+                   "ZoteroLibrary.qml").read_text()
+        match = re.search(r"^    function finishCommand\(\) \{.*?^    \}",
+                          content, re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(match)
+        script = r'''
+const assert = require("node:assert/strict");
+let busy=true, pendingAction="settings", status="", commandError="";
+let pagination={limit:8}, calls=[], logs=[];
+const bridgeCommand={exitCode:0, output:JSON.stringify({ok:true,configured:false})};
+function appendLog(message) { logs.push(message); }
+function loadTags(refresh) { calls.push(refresh); }
+finishCommand();
+assert.equal(busy, false);
+assert.match(status, /Settings > Zotero Bridge/);
+assert.deepEqual(calls, []);
+bridgeCommand.output=JSON.stringify({ok:true,configured:true,list_page_limit:12});
+finishCommand();
+assert.deepEqual(calls, [false]);
+assert.equal(pagination.limit, 12);
+bridgeCommand.exitCode=1;
+bridgeCommand.output=JSON.stringify({ok:false,error:"configuration_error",message:"Invalid configuration syntax on line 3"});
+finishCommand();
+assert.match(status, /line 3/);
+assert.deepEqual(calls, [false]);
+'''
+        result = subprocess.run([shutil.which("node"), "-e", match.group() + "\n" + script],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Settings JavaScript test requires Node.js")
+    def test_first_run_settings_javascript_flow(self):
+        content = (ROOT / "xovi" / "3.28" / "zoteroBridgeSettings.qmd").read_text()
+        functions = []
+        for name in ("finishCommand", "saveSettings", "testConnection"):
+            match = re.search(r"^ {20}function " + name + r"\([^)]*\) \{.*?^ {20}\}",
+                              content, re.MULTILINE | re.DOTALL)
+            self.assertIsNotNone(match, name)
+            functions.append(match.group())
+        script = r'''
+const assert = require("node:assert/strict");
+let busy = false, configured = false, settings = {}, useWebdav = false, libraryType = "user";
+let status = "", queueTag = "", syncedTag = "", tags = [], collections = [], events = [];
+let pendingKind = "settings";
+const settingsCommand = {output:"", exitCode:0};
+const field = () => ({text:""});
+const libraryIdInput = field(), apiKeyInput = field(), apiKeyHint = field();
+const urlInput = field(), usernameInput = field(), passwordInput = field(), passwordHint = field();
+const folderInput = field(), reverseFolderInput = field(), listPageLimitInput = field();
+let calls = [], sent = [], pendingRequest;
+function run(args) { calls.push(args); }
+const bridgeSettings = {run};
+Object.defineProperty(bridgeSettings, "busy", {get:() => busy, set:value => busy=value});
+Object.defineProperty(bridgeSettings, "status", {get:() => status, set:value => status=value});
+class XMLHttpRequest {
+    static DONE = 4;
+    open(method, path) { this.method=method; this.path=path; pendingRequest=this; }
+    send(body) { sent.push(JSON.parse(body)); }
+}
+function load(configuredValue, storage) {
+    settingsCommand.output = JSON.stringify({
+        ok:true, configured:configuredValue,
+        configuration_message:configuredValue ? "" : "Enter Zotero credentials",
+        zotero:{library_id:configuredValue ? "123" : "", library_type:"user", api_key_set:configuredValue},
+        webdav:{enabled:storage, url:"", username:"", password_set:configuredValue},
+        default_target_folder:"Zotero/unread", reverse_sync_folder:"Zotero/Read",
+        sync_queue_tag:"to_sync", sync_synced_tag:"synced", list_page_limit:8
+    });
+    finishCommand();
+}
+load(false, false);
+assert.equal(configured, false);
+assert.deepEqual(calls, []);
+assert.equal(folderInput.text, "Zotero/unread");
+testConnection();
+assert.match(status, /Save/);
+assert.deepEqual(calls, []);
+libraryIdInput.text="123"; apiKeyInput.text="new-key"; passwordInput.text="new-password";
+saveSettings();
+assert.equal(busy, true);
+assert.equal(apiKeyInput.text, "");
+assert.equal(passwordInput.text, "");
+assert.equal(sent[0].api_key, "new-key");
+assert.equal(sent[0].use_webdav, false);
+assert.equal(sent[0].library_id, "123");
+pendingRequest.readyState=XMLHttpRequest.DONE;
+pendingRequest.status=0;
+pendingRequest.onreadystatechange();
+assert.deepEqual(calls, [["settings-apply"]]);
+assert.equal(busy, false);
+calls=[];
+load(true, false);
+assert.equal(apiKeyInput.text, "");
+assert.deepEqual(calls, [["tags", "--json"]]);
+calls=[];
+testConnection();
+assert.deepEqual(calls, [["check-connection"]]);
+calls=[];
+load(true, true);
+calls=[];
+testConnection();
+assert.deepEqual(calls, [["check-connection", "--webdav"]]);
+settingsCommand.output=JSON.stringify({ok:true,metadata:"accessible",storage:"zotero",pdf_download:"not_tested"});
+finishCommand();
+assert.match(status, /PDF access has not been tested/);
+settingsCommand.exitCode=1;
+settingsCommand.output=JSON.stringify({ok:false,error:"settings_error",message:"Invalid setting: library_id"});
+finishCommand();
+assert.match(status, /library_id/);
+settingsCommand.exitCode=0;
+const before=sent.length;
+listPageLimitInput.text="0";
+saveSettings();
+assert.equal(sent.length, before);
+assert.match(status, /integer/);
+'''
+        result = subprocess.run([shutil.which("node"), "-e", "\n".join(functions) + "\n" + script],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_supported_firmware_patches_have_identical_wired_action(self):
         patches = [
             ROOT / "xovi" / version / "zoteroQuickSync.qmd"
@@ -114,7 +238,9 @@ class ZoteroQuickSyncQmdTests(unittest.TestCase):
         self.assertIn('run(["activity-log"])', content)
         self.assertIn('run(["clear-activity-log"])', content)
         self.assertIn('status = "Cleared " + result.cleared + " log events"', content)
-        self.assertIn('run(["check-connection", "--webdav"])', content)
+        self.assertIn('["check-connection", "--webdav"] : ["check-connection"]', content)
+        self.assertIn("bridgeSettings.testConnection()", content)
+        self.assertIn("bridgeSettings.configured", content)
         self.assertIn("Sync to Zotero from reMarkable Cloud", content)
         self.assertIn("reverse_sync_folder: reverseFolderInput.text", content)
         self.assertIn('text: "Zotero/Read"', content)
@@ -146,7 +272,17 @@ class ZoteroQuickSyncQmdTests(unittest.TestCase):
         self.assertIn('text: "Test Zotero connection"', content)
         self.assertIn('text: "Refresh tags"', content)
         self.assertIn("password_set", content)
-        self.assertNotIn("api_key", content)
+        self.assertIn("id: apiKeyInput", content)
+        self.assertIn("draft.api_key = apiKeyInput.text", content)
+        self.assertIn("apiKeyInput.text = \"\"", content)
+        self.assertIn("result.zotero.api_key_set", content)
+        self.assertIn("library_id: libraryIdInput.text", content)
+        self.assertIn("library_type: libraryType", content)
+        self.assertIn("use_webdav: useWebdav", content)
+        self.assertIn('model: ["Zotero Storage", "WebDAV"]', content)
+        self.assertIn("if (!result.applied && configured)", content)
+        self.assertIn("result.message || result.error", content)
+        self.assertNotIn("result.zotero.api_key;", content)
         self.assertNotIn('webdav_password: "', content)
 
     def test_windows_update_script_deploys_runtime_and_328_qmd_files(self):

@@ -462,14 +462,36 @@ sh scripts/zotbridge-run.sh reverse-sync
 sh scripts/zotbridge-run.sh sync-all
 ```
 
-`settings --json` returns the WebDAV URL and username, `password_set` rather than
-the password, default target folder, and configured queue/completion tags. It
-never returns the Zotero API key or WebDAV password. `settings-apply` consumes
+On a new installation, open **Settings > Zotero Bridge** after restarting XOVI.
+Enter your numeric Zotero library ID, personal/group library type, and API key.
+Select **Zotero Storage** or **WebDAV**; WebDAV requires a personal library,
+an HTTPS directory URL, username and password. Read access is sufficient for
+browsing/import; sync that changes Zotero tags or uploads attachments needs write
+access. No SSH editing or initial `config.toml` is required.
+
+**Save settings** works offline and creates a private (`0600`) configuration.
+**Test Zotero connection** is a separate action using the saved settings: it
+checks metadata and, for WebDAV, directory access without downloading/importing
+documents. Save edits before testing. PDF access is not verified by this test.
+Tag/collection refresh is disabled until a valid configuration is saved.
+
+`settings --json` works without a config or curl and returns `configured: false`
+with first-run defaults when setup is incomplete. It includes the Zotero library
+ID/type, `api_key_set`, the WebDAV URL/username and `password_set`, never the API
+key or password. Invalid settings identify a field; malformed config syntax
+identifies a line without echoing credentials. Commands that browse, import or
+sync still require valid configuration.
+
+`settings-apply` consumes
 only `.zotbridge-settings-draft.json` beside `config.toml`, validates it, writes
 an atomically replaced configuration, and deletes the draft on success. A missing
-`webdav_password` preserves the existing stored password; a supplied nonempty
-value replaces it. Invalid drafts do not change configuration and remain available
-for correction.
+`api_key` or `webdav_password` preserves the corresponding existing secret;
+a supplied nonempty value replaces it. The UI uses masked replacement fields and
+clears them after submitting. Explicit empty secret replacements are rejected.
+Storage selection uses `use_webdav`; disabled WebDAV values are preserved but
+are not required or used for Zotero Storage. Older drafts omitting the new Zotero
+fields/storage choice preserve their existing values. Invalid drafts do not
+change configuration and remain available for correction.
 
 The configuration remains a flat TOML subset. Applying settings rewrites its
 supported scalar values and therefore does not preserve comments/formatting;
@@ -669,15 +691,17 @@ cd /home/root/xovi-zotero-bridge
 unzip -o xovi-zotero-library-aarch64.zip
 chmod 755 bin/jq
 chmod 755 bin/zotbridge-localgeta
-chmod 600 config.toml
 ./bin/jq --version
+# After configuring through Settings > Zotero Bridge:
 sh scripts/zotbridge-run.sh check-connection
 sh scripts/zotbridge-run.sh list --limit 5 --json
 ```
 
 The ZIP does **not** contain `config.toml`, so extracting it preserves your existing
-credentials. On a new installation, copy `config.example.toml` to `config.toml`
-and fill in the Zotero/WebDAV settings first. Never commit the credentials.
+credentials. With the 3.28 Settings patch installed, use **Settings > Zotero Bridge**
+for initial setup; it creates `config.toml` with private permissions. For CLI-only
+installations, copy `config.example.toml` to `config.toml`, edit the Zotero/storage
+settings and run `chmod 600 config.toml`. Never commit the credentials.
 
 The launcher defaults to the Bash backend. Your existing config remains usable.
 The example enables WebDAV for a personal library; set `use_webdav = false` for

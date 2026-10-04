@@ -277,6 +277,191 @@ class ShellSmokeTests(unittest.TestCase):
         self.assertIn('reverse_sync_folder = "Zotero/Read and annotated"', saved)
         self.assertNotIn("password-secret", applied.stdout)
 
+    def settings_draft(self, **overrides):
+        draft = {
+            "version": 1, "library_id": "123", "library_type": "user",
+            "use_webdav": False, "default_target_folder": "Zotero/unread",
+            "reverse_sync_folder": "Zotero/Read", "sync_queue_tag": "to_sync",
+            "sync_synced_tag": "synced", "list_page_limit": 8,
+        }
+        draft.update(overrides)
+        path = self.root / ".zotbridge-settings-draft.json"
+        path.write_text(json.dumps(draft))
+        return path
+
+    def test_first_run_settings_needs_no_config_curl_or_network(self):
+        self.config.unlink()
+        self.env["ZOTBRIDGE_CURL"] = str(self.root / "missing-curl")
+        result = self.run_cli("settings", "--json")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(result.stdout)
+        self.assertFalse(data["configured"])
+        self.assertEqual(data["zotero"], {
+            "library_id": "", "library_type": "user", "api_key_set": False,
+        })
+        self.assertFalse(data["webdav"]["enabled"])
+        self.assertEqual(data["default_target_folder"], "Zotero/unread")
+        self.assertFalse(self.config.exists())
+        self.assertFalse(self.requests.exists())
+        blocked = self.run_cli("list", "--json")
+        self.assertNotEqual(blocked.returncode, 0)
+        self.assertIn("Setup required", json.loads(blocked.stdout)["message"])
+
+    def test_settings_reports_missing_jq_instead_of_silent_startup_failure(self):
+        self.env["ZOTBRIDGE_JQ"] = str(self.root / "missing-jq")
+        result = self.run_cli("settings", "--json")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(json.loads(result.stdout)["error"], "missing_dependency")
+
+    def test_first_run_save_for_both_storage_modes_is_offline_and_private(self):
+        for webdav in (False, True):
+            with self.subTest(webdav=webdav):
+                self.config.unlink(missing_ok=True)
+                self.env["ZOTBRIDGE_CURL"] = str(self.root / "missing-curl")
+                options = {"use_webdav": webdav, "api_key": 'new-key-"\\secret'}
+                if webdav:
+                    options.update(webdav_url="https://dav.example/zotero",
+                                   webdav_username="reader",
+                                   webdav_password='new-password-"\\secret')
+                draft = self.settings_draft(**options)
+                result = self.run_cli("settings-apply")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                data = json.loads(result.stdout)
+                self.assertTrue(data["configured"])
+                self.assertTrue(data["applied"])
+                self.assertTrue(data["zotero"]["api_key_set"])
+                self.assertEqual(data["webdav"]["enabled"], webdav)
+                self.assertEqual(self.config.stat().st_mode & 0o777, 0o600)
+                self.assertFalse(draft.exists())
+                self.assertFalse(self.requests.exists())
+                self.assertNotIn("new-key", result.stdout + result.stderr)
+                self.assertNotIn("new-password", result.stdout + result.stderr)
+                self.assertEqual(list(self.root.glob("config.toml.new.*")), [])
+                self.env["ZOTBRIDGE_CURL"] = str(self.curl)
+                check = self.run_cli("check-connection", *(["--webdav"] if webdav else []))
+                self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+                if webdav:
+                    self.assertEqual(json.loads(check.stdout)["webdav"], "accessible")
+                self.requests.unlink()
+
+    def test_missing_required_settings_reports_field_and_does_not_create_config(self):
+        self.config.unlink()
+        draft = self.settings_draft()
+        result = self.run_cli("settings-apply")
+        self.assertNotEqual(result.returncode, 0)
+        data = json.loads(result.stdout)
+        self.assertEqual(data["error"], "settings_error")
+        self.assertIn("api_key", data["message"])
+        self.assertFalse(self.config.exists())
+        self.assertTrue(draft.exists())
+        self.assertFalse(self.requests.exists())
+
+    def test_storage_switch_preserves_secrets_and_unrelated_settings(self):
+        with self.config.open("a") as config:
+            config.write('custom_setting = "keep me"\n')
+        self.settings_draft()
+        result = self.run_cli("settings-apply")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(json.loads(result.stdout)["webdav"]["enabled"])
+        saved = self.config.read_text()
+        for entry in ('api_key = "test-secret"', 'webdav_password = "password-secret"',
+                      'custom_setting = "keep me"'):
+            self.assertIn(entry, saved)
+        self.settings_draft(use_webdav=True)
+        result = self.run_cli("settings-apply")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(json.loads(result.stdout)["webdav"]["password_set"])
+
+    def test_settings_replaces_api_key_without_returning_it(self):
+        self.settings_draft(api_key="replacement-secret")
+        result = self.run_cli("settings-apply")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('api_key = "replacement-secret"', self.config.read_text())
+        self.assertNotIn("replacement-secret", result.stdout + result.stderr)
+        self.assertNotIn("test-secret", result.stdout + result.stderr)
+
+    def test_group_library_can_save_with_zotero_storage(self):
+        self.config.unlink()
+        self.settings_draft(library_type="group", api_key="group-secret")
+        result = self.run_cli("settings-apply")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(result.stdout)
+        self.assertTrue(data["configured"])
+        self.assertEqual(data["zotero"]["library_type"], "group")
+        self.assertFalse(data["webdav"]["enabled"])
+        self.assertFalse(self.requests.exists())
+
+    def test_settings_can_repair_invalid_field_without_network(self):
+        self.config.write_text(self.config.read_text().replace('library_id = "123"', 'library_id = "bad"'))
+        settings = self.run_cli("settings", "--json")
+        self.assertEqual(settings.returncode, 0, settings.stdout + settings.stderr)
+        self.assertFalse(json.loads(settings.stdout)["configured"])
+        self.assertIn("library_id", json.loads(settings.stdout)["configuration_message"])
+        self.settings_draft()
+        result = self.run_cli("settings-apply")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(self.requests.exists())
+
+    def test_invalid_settings_fields_are_actionable_and_preserve_config(self):
+        cases = [
+            ({"library_id": "secret-invalid-id"}, "library_id"),
+            ({"library_type": "invalid"}, "library_type"),
+            ({"library_type": "group", "use_webdav": True}, "library_type"),
+            ({"use_webdav": True, "webdav_url": "http://dav.example/"}, "webdav_url"),
+            ({"use_webdav": True, "webdav_password": ""}, "webdav_password"),
+            ({"api_key": ""}, "api_key"),
+            ({"list_page_limit": 0}, "list_page_limit"),
+            ({"sync_queue_tag": "synced"}, "sync_synced_tag"),
+            ({"default_target_folder": "Zotero//bad"}, "default_target_folder"),
+            ({"unexpected": "secret-invalid-id"}, "unsupported"),
+        ]
+        original = self.config.read_bytes()
+        for options, field in cases:
+            with self.subTest(field=field, options=options):
+                self.settings_draft(**options)
+                result = self.run_cli("settings-apply")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(field, json.loads(result.stdout)["message"])
+                self.assertEqual(self.config.read_bytes(), original)
+                self.assertNotIn("secret-invalid-id", result.stdout + result.stderr)
+                self.assertFalse(self.requests.exists())
+
+    def test_config_syntax_error_identifies_line_without_exposing_secret(self):
+        self.config.write_text(self.config.read_text().replace('api_key = "test-secret"',
+                                                              'api_key = do-not-disclose'))
+        result = self.run_cli("settings", "--json")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("line 3", json.loads(result.stdout)["message"])
+        self.assertNotIn("do-not-disclose", result.stdout + result.stderr)
+
+    def test_invalid_string_escape_does_not_expose_secret(self):
+        self.config.write_text(self.config.read_text().replace('api_key = "test-secret"',
+                                                              r'api_key = "private-\x-secret"'))
+        result = self.run_cli("settings", "--json")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("line 3", json.loads(result.stdout)["message"])
+        self.assertNotIn("private", result.stdout + result.stderr)
+
+    def test_settings_rejects_symlinks_and_busy_lock(self):
+        draft = self.settings_draft()
+        original = self.config.read_bytes()
+        draft.unlink()
+        target = self.root / "other-draft.json"
+        target.write_text("{}")
+        draft.symlink_to(target)
+        result = self.run_cli("settings-apply")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.config.read_bytes(), original)
+        draft.unlink()
+        self.settings_draft()
+        import fcntl
+        with Path(str(self.config) + ".lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            result = self.run_cli("settings-apply")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(json.loads(result.stdout)["error"], "busy")
+        self.assertEqual(self.config.read_bytes(), original)
+
     def test_reverse_sync_reports_broker_unavailable_instead_of_silent_failure(self):
         # Regression test: reverse-sync used to redirect its stdout to a WORK file
         # that was deleted before an internal fail() (e.g. broker unreachable) could
