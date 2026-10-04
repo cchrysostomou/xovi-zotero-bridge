@@ -5,6 +5,7 @@ $source = Join-Path $root "xovi"
 $outputDirectory = Join-Path $root "dist"
 $output = Join-Path $outputDirectory "xovi-zotero-quick-settings-qmd.zip"
 $files = @(
+    @{ Path = (Join-Path $root "LICENSE"); Name = "LICENSE" }
     @{ Path = (Join-Path $source "README.md"); Name = "README.md" }
     @{ Path = (Join-Path $source "3.27\zoteroQuickSync.qmd"); Name = "3.27/zoteroQuickSync.qmd" }
     @{ Path = (Join-Path $source "3.28\zoteroQuickSync.qmd"); Name = "3.28/zoteroQuickSync.qmd" }

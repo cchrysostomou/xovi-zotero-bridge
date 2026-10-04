@@ -32,11 +32,13 @@ class TabletPackageTests(unittest.TestCase):
                 "scripts/zotbridge-shell-sync.sh",
                 "scripts/zotbridge-shell-reverse.sh",
                 "scripts/zotbridge-shell-settings.jq",
-                "bin/jq", "bin/zotbridge-localgeta", "bin/7zz", "config.example.toml", "README.md",
+                "bin/jq", "bin/zotbridge-localgeta", "bin/7zz", "config.example.toml", "README.md", "LICENSE",
                 "licenses/jq-COPYING", "licenses/oniguruma-COPYING", "licenses/musl-COPYRIGHT",
                 "licenses/rmapi-AGPL-3.0.txt", "licenses/7zip-License.txt",
                 "licenses/zotbridge-localgeta-NOTICE.txt",
             }.issubset(names))
+            self.assertEqual(package.read("LICENSE").decode("utf-8"),
+                             (PACKAGE.parents[1] / "LICENSE").read_text(encoding="utf-8"))
             self.assertNotIn("scripts/check-pdf-download.sh", names)
             self.assertNotIn("scripts/zotbridge-shell-library.jq", names)
             for name in names:

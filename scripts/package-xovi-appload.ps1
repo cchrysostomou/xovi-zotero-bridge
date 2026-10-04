@@ -94,6 +94,7 @@ $zip = New-Object System.IO.Compression.ZipArchive(
 $encoding = New-Object System.Text.UTF8Encoding($false)
 try {
     $files = @(
+        @{ Path = (Join-Path $root "LICENSE"); Name = "zotero-library/LICENSE"; Binary = $false; Mode = 33188 }
         @{ Path = (Join-Path $source "manifest.json"); Name = "zotero-library/manifest.json"; Binary = $false; Mode = 33188 }
         @{ Path = (Join-Path $source "icon.png"); Name = "zotero-library/icon.png"; Binary = $true; Mode = 33188 }
         @{ Path = $resources; Name = "zotero-library/resources.rcc"; Binary = $true; Mode = 33188 }

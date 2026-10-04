@@ -4,6 +4,55 @@ On-demand Zotero integration for reMarkable using xovi + rm-librarian.
 The backend runs on the tablet only when invoked; it needs no laptop service
 or additional background daemon.
 
+## License
+
+Original bridge code is licensed under the [MIT License](LICENSE), copyright
+2026 Constantine Chrysostomou. This does not relicense third-party code:
+`tools/rmapi-fork` and the derived `zotbridge-localgeta` binary remain under
+AGPL-3.0. Bundled jq, Oniguruma, musl and 7-Zip retain their respective licenses;
+the tablet archive includes their redistribution notices in `licenses/`.
+All distribution ZIPs include the bridge's MIT license.
+
+## Vellum packaging
+
+Build the combined local-test package from Windows PowerShell:
+
+```powershell
+.\scripts\package-vellum.ps1 -Local
+```
+
+It requires WSL Ubuntu and the existing Qt/Go packaging toolchain. The output is
+`dist\vellum\xovi-zotero-bridge-0.1.0-aarch64.tar.gz`, plus a local-test VELBUILD
+under `dist\vellum\packages\zotero-remarkable-sync`. The Vellum package name is
+`zotero-remarkable-sync`; repository, release archive and runtime paths retain
+`xovi-zotero-bridge`. It contains the shell runtime,
+AppLoad app, all three 3.28 QMD patches, icon, bundled jq, 7zz and local annotation
+helper. An exact file-list and permissions check excludes credentials, state,
+PDFs and the Python environment.
+
+This package targets aarch64 and firmware **3.28.x only**. Bundled jq and the Go
+helper are static; 7zz uses the firmware's ARM64 glibc loader, libstdc++, libgcc
+and standard C libraries. The install hook checks those libraries and required
+firmware tools. AppLoad, qt-command-executor, librarian and curl come from Vellum.
+Restart xochitl with XOVI using the device's normal procedure after installation,
+then configure through Settings > Zotero Bridge.
+
+The payload includes MIT and third-party notices under
+`/home/root/.vellum/licenses/zotero-remarkable-sync`, the helper's corresponding
+source with vendored Go dependencies and build instructions, matching 7-Zip
+source, and source links/checksums. Configuration and bridge state are preserved
+on uninstall, including purge; remove them manually only after reviewing and
+backing up any custom state paths. reMarkable library documents are never
+package-owned.
+
+For publication, commit and publish these changes first, then build from that
+clean checkout with `.\scripts\package-vellum.ps1 -Commit <full-commit-sha>`.
+Upload the generated payload unchanged to the `v0.1.0` release and use the
+generated release VELBUILD. Local-test recipes are not suitable for submission.
+This build does not establish Vellum device install/upgrade/removal coverage.
+Follow Vellum's contribution rules: submit the PR personally and write its
+description and follow-up comments yourself.
+
 ## Zotero library API
 
 The tablet-facing library operation is now a reusable backend function,
