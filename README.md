@@ -150,7 +150,20 @@ import state is separate and is not automatically migrated.
 `list --skip N` starts at a zero-based offset; `--start` is an alias. `--limit`
 remains 1-100. Query, tag and bibliographic-type filters are applied by Zotero
 **before** pagination, so excluded attachments and notes do not leave gaps in the
-displayed pages. Sorting is explicitly `dateModified` descending.
+displayed pages.
+
+`--sort title|creator|dateAdded|dateModified` and `--direction asc|desc` are
+passed through to Zotero, which sorts before paginating. Sorting defaults to
+`dateModified` descending.
+
+`--refresh` bypasses that cache and refetches from Zotero, replacing the stored
+entry; the app's Refresh button uses it. Listing pages are otherwise cached on
+disk beside the state file in `<state_json_path>.list-cache.json` for
+`list_cache_ttl_s` seconds (default `86400`, i.e. 24 hours; `0` disables
+caching). The cache holds only the fields Zotero returned, so import mappings
+are re-applied from live state on every listing and a cached page still shows
+current reMarkable badges. It is capped at the 60 most recent entries and
+expired entries are dropped on write.
 
 Existing `list --json` callers still receive an array. For a UI, use `--page-info`,
 which implies JSON and returns:
@@ -163,6 +176,9 @@ which implies JSON and returns:
       "item_key": "ABCD1234",
       "title": "Example paper",
       "year": "2024",
+      "creator": "Darwin",
+      "date_added": "2024-01-02T03:04:05Z",
+      "date_modified": "2024-05-06T07:08:09Z",
       "has_pdf": true,
       "mapping": null,
       "attempt": null
@@ -179,7 +195,10 @@ which implies JSON and returns:
 ```
 
 The total is the filtered bibliographic result count from Zotero's `Total-Results`
-header. Preserve the query/tags/limit and pass `next_skip` to retrieve the next
+header. `creator` is Zotero's `creatorSummary` and is an empty string when the item has
+no creators. `date_added` and `date_modified` are Zotero's raw ISO-8601 timestamps,
+exposed so a client that has cached a complete result set can re-sort it locally
+instead of re-querying. Preserve the query/tags/limit and pass `next_skip` to retrieve the next
 page. On the last page, `has_more` is false and `next_skip` is null. An offset
 past the end returns an empty page. Reset the offset when filters change.
 Offset pagination is not a snapshot: library edits between requests can shift
@@ -439,16 +458,13 @@ The tablet Settings page calls these shell-only commands:
 ```sh
 sh scripts/zotbridge-run.sh settings --json
 sh scripts/zotbridge-run.sh settings-apply
-sh scripts/zotbridge-run.sh rmapi-status
-sh scripts/zotbridge-run.sh rmapi-pair
 sh scripts/zotbridge-run.sh reverse-sync
 sh scripts/zotbridge-run.sh sync-all
 ```
 
 `settings --json` returns the WebDAV URL and username, `password_set` rather than
-the password, default target folder, configured queue/completion tags, and only
-the installed/paired booleans for rmapi. It never returns the Zotero API key,
-WebDAV password, or reMarkable Cloud tokens. `settings-apply` consumes
+the password, default target folder, and configured queue/completion tags. It
+never returns the Zotero API key or WebDAV password. `settings-apply` consumes
 only `.zotbridge-settings-draft.json` beside `config.toml`, validates it, writes
 an atomically replaced configuration, and deletes the draft on success. A missing
 `webdav_password` preserves the existing stored password; a supplied nonempty
@@ -459,21 +475,16 @@ The configuration remains a flat TOML subset. Applying settings rewrites its
 supported scalar values and therefore does not preserve comments/formatting;
 unknown scalar keys are retained. Keep a backup before manual edits.
 
-For reMarkable Cloud pairing, install the bundled rmapi binary, generate an
-eight-character one-time code at `my.remarkable.com/device/browser/connect`, and
-enter it in the 3.28 Settings page. The page writes a short-lived private
-`.zotbridge-rmapi-pair-draft.json`; `rmapi-pair` validates and deletes that draft,
-pairs into a temporary candidate configuration, and atomically installs `.rmapi`
-with mode `0600` only after rmapi successfully accesses the cloud. **Pair** refuses
-to overwrite an existing `.rmapi`. The explicit **Re-pair** action can replace it,
-but only after the candidate pairing succeeds; failure preserves the current
-token. Neither the one-time code nor tokens are returned or written to the
-activity log. `reverse_sync_folder` defaults to `Zotero/Read` and identifies the
-reMarkable folder that reverse synchronization inspects.
+There is no reMarkable Cloud pairing step. reverse-sync reads directly from the
+on-device xochitl library using the bundled `zotbridge-localgeta` binary, so no
+cloud account, one-time pairing code, or stored cloud token is ever required.
+`reverse_sync_folder` defaults to `Zotero/Read` and identifies the reMarkable
+folder that reverse synchronization inspects.
 
-`reverse-sync` exports each direct document in that folder through rmapi, creates
-an annotated PDF attachment under its mapped Zotero parent, or creates a new
-`document` parent tagged `from-rmk` when no mapping exists. For WebDAV libraries,
+`reverse-sync` locates each direct document in that folder on-device, runs
+`zotbridge-localgeta` to merge its stored `.pdf` with its `.rm` annotation layers
+into an annotated PDF, then attaches that PDF under its mapped Zotero parent, or
+creates a new `document` parent tagged `from-rmk` when no mapping exists. For WebDAV libraries,
 it writes `<attachment-key>.zip` before the `.prop` commit marker and verifies
 the Zotero attachment metadata, `.prop`, and downloaded ZIP contents. Only then
 does it move the source document to `<reverse_sync_folder>/Copied2Zotero`.
@@ -642,12 +653,14 @@ the tablet package from this checkout:
 .\scripts\package-tablet.ps1
 ```
 
-This downloads jq 1.8.2 and rmapi v0.0.35 from their official releases, verifies
-their pinned SHA-256 hashes, and creates
+This downloads jq 1.8.2 from its official release, verifies its pinned SHA-256
+hash, builds `zotbridge-localgeta` (the local, offline PDF+annotation merger)
+from its Go source, and creates
 `dist\xovi-zotero-library-aarch64.zip`. The ZIP contains LF-terminated shell
-scripts, both ARM64 binaries, and redistribution notices including rmapi's
-AGPL-3.0 license. It excludes credentials, `.rmapi`, pairing drafts, state, and
-the Python environment. It is for **aarch64 only**, not reMarkable 1/2's ARM32 CPU.
+scripts, both ARM64 binaries, and redistribution notices including the AGPL-3.0
+license for the reMarkable-format parsing code `zotbridge-localgeta` is derived
+from. It excludes credentials, state, and the Python environment. It is for
+**aarch64 only**, not reMarkable 1/2's ARM32 CPU.
 
 Copy that ZIP into `/home/root/xovi-zotero-bridge` on the tablet, then run there:
 
@@ -655,10 +668,9 @@ Copy that ZIP into `/home/root/xovi-zotero-bridge` on the tablet, then run there
 cd /home/root/xovi-zotero-bridge
 unzip -o xovi-zotero-library-aarch64.zip
 chmod 755 bin/jq
-chmod 755 bin/rmapi
+chmod 755 bin/zotbridge-localgeta
 chmod 600 config.toml
 ./bin/jq --version
-sh scripts/zotbridge-run.sh rmapi-status
 sh scripts/zotbridge-run.sh check-connection
 sh scripts/zotbridge-run.sh list --limit 5 --json
 ```

@@ -18,6 +18,19 @@ class Paper:
     title: str
     year: str
     has_pdf: bool
+    num_children: int
+
+
+@dataclass(frozen=True)
+class Attachment:
+    attachment_key: str
+    title: str
+
+
+@dataclass(frozen=True)
+class Collection:
+    key: str
+    name: str
 
 
 @dataclass(frozen=True)
@@ -48,19 +61,28 @@ class ZoteroBridge:
         self.zot.top(limit=1)
 
     def search(
-        self, query: str, limit: int = 20, skip: int = 0, tags: list[str] | None = None
+        self, query: str, limit: int = 20, skip: int = 0, tags: list[str] | None = None,
+        collection: str | None = None,
     ) -> list[Paper]:
-        return self.search_page(query, limit, skip, tags).items
+        return self.search_page(query, limit, skip, tags, collection).items
 
     def search_page(
-        self, query: str, limit: int = 20, skip: int = 0, tags: list[str] | None = None
+        self, query: str, limit: int = 20, skip: int = 0, tags: list[str] | None = None,
+        collection: str | None = None,
     ) -> LibraryPage:
         if not 1 <= limit <= 100 or not 0 <= skip <= 2147483647:
             raise ValueError("limit must be 1-100 and skip must be 0-2147483647")
+        if collection is not None and re.fullmatch(r"[A-Z0-9]{8}", collection) is None:
+            raise ValueError("collection must contain exactly eight uppercase letters or digits")
         filters = {"tag": tag_expression(tags)} if tags else {}
-        items = self.zot.top(
+        common_kwargs = dict(
             q=query, limit=limit, start=skip, sort="dateModified", direction="desc",
             itemType="-attachment || note || annotation", **filters,
+        )
+        items = (
+            self.zot.collection_items_top(collection, **common_kwargs)
+            if collection is not None
+            else self.zot.top(**common_kwargs)
         )
         raw_total = self.zot.request.headers.get("Total-Results", "")
         if not isinstance(raw_total, str) or re.fullmatch(r"[0-9]+", raw_total) is None:
@@ -79,9 +101,13 @@ class ZoteroBridge:
             item_key = data.get("key", "")
             title = data.get("title", "").strip()
             year = str(data.get("date", "")).strip()
-            has_pdf = self._first_pdf_attachment_key(item_key) is not None
+            num_children = item.get("meta", {}).get("numChildren", 0)
+            if not isinstance(num_children, int):
+                num_children = 0
+            has_pdf = num_children > 0
             papers.append(
-                Paper(item_key=item_key, title=title, year=year, has_pdf=has_pdf)
+                Paper(item_key=item_key, title=title, year=year, has_pdf=has_pdf,
+                      num_children=num_children)
             )
         return LibraryPage(papers, skip, limit, total, next_skip)
 
@@ -90,6 +116,22 @@ class ZoteroBridge:
         if not isinstance(tags, list) or any(not isinstance(tag, str) for tag in tags):
             raise RuntimeError("Zotero returned invalid tag data")
         return sorted(set(tags))
+
+    def list_collections(self) -> list[Collection]:
+        raw = self.zot.everything(self.zot.collections_top(limit=100))
+        if not isinstance(raw, list):
+            raise RuntimeError("Zotero returned invalid collection data")
+        collections: list[Collection] = []
+        for entry in raw:
+            if not isinstance(entry, dict):
+                raise RuntimeError("Zotero returned invalid collection data")
+            data = entry.get("data", {})
+            key = str(data.get("key", ""))
+            if re.fullmatch(r"[A-Z0-9]{8}", key) is None:
+                raise RuntimeError("Zotero returned an invalid collection key")
+            name = str(data.get("name", "")).strip()
+            collections.append(Collection(key=key, name=name))
+        return collections
 
     def _first_pdf_attachment_key(self, item_key: str) -> Optional[str]:
         for child in self.zot.everything(self.zot.children(item_key)):
@@ -101,12 +143,42 @@ class ZoteroBridge:
                 return str(data["key"])
         return None
 
+    def list_pdf_attachments(self, item_key: str) -> list[Attachment]:
+        attachments: list[Attachment] = []
+        for child in self.zot.everything(self.zot.children(item_key)):
+            data = child.get("data", {})
+            if (
+                data.get("contentType") == "application/pdf"
+                and data.get("linkMode") in ("imported_file", "imported_url")
+            ):
+                title = str(data.get("title") or data.get("filename") or "")
+                attachments.append(Attachment(attachment_key=str(data["key"]), title=title))
+        return attachments
+
     @contextmanager
     def download_first_pdf(self, item_key: str) -> Iterator[tuple[Path, str]]:
         attachment_key = self._first_pdf_attachment_key(item_key)
         if attachment_key is None:
             raise RuntimeError(f"No stored PDF attachment found for item {item_key}")
+        with self._download_attachment(item_key, attachment_key) as result:
+            yield result
 
+    @contextmanager
+    def download_attachment(self, item_key: str, attachment_key: str) -> Iterator[tuple[Path, str]]:
+        attachment = self.zot.item(attachment_key).get("data", {})
+        if (
+            attachment.get("parentItem") != item_key
+            or attachment.get("contentType") != "application/pdf"
+            or attachment.get("linkMode") not in ("imported_file", "imported_url")
+        ):
+            raise RuntimeError(
+                f"The requested attachment {attachment_key} is not a stored PDF that belongs to item {item_key}"
+            )
+        with self._download_attachment(item_key, attachment_key) as result:
+            yield result
+
+    @contextmanager
+    def _download_attachment(self, item_key: str, attachment_key: str) -> Iterator[tuple[Path, str]]:
         with tempfile.TemporaryDirectory(prefix="zotbridge-") as td:
             downloaded = Path(td) / "document.pdf"
             if self.webdav is not None:

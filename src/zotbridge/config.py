@@ -30,6 +30,7 @@ class Config:
     webdav: WebDAVConfig | None = None
     state_json_path: str = "./zotbridge-state.db.json"
     default_target_folder: str = "Zotero/unread"
+    list_page_limit: int = 8
 
 
 def load_config(path: Path | None = None) -> Config:
@@ -75,6 +76,9 @@ def config_from_dict(raw: dict, config_path: Path) -> Config:
         pass
     else:
         raise ValueError("default_target_folder must be a path, not an unchecked UUID")
+    list_page_limit = raw.get("list_page_limit", 8)
+    if type(list_page_limit) is not int or not 1 <= list_page_limit <= 100:
+        raise ValueError("list_page_limit must be an integer from 1 to 100")
     webdav = None
     enabled = raw.get("use_webdav", False)
     if not isinstance(enabled, bool):
@@ -118,6 +122,7 @@ def config_from_dict(raw: dict, config_path: Path) -> Config:
         state_db_path=str(state_path),
         state_json_path=str(json_path),
         default_target_folder=target,
+        list_page_limit=list_page_limit,
         broker_timeout_s=timeout,
         xochitl_dir=str(
             raw.get("xochitl_dir", os.environ.get("XOCHITL_DIR", Config.xochitl_dir))

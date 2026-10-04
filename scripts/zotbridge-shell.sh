@@ -23,10 +23,9 @@ STATE_STAGE=
 ACTIVITY_LOG=
 ACTIVITY_READY=false
 ACTIVITY_LOGGED=false
-RMAPI=
-RMAPI_CONFIG=
-RMAPI_PAIR_DRAFT=
+LOCALGETA=
 SEVEN_ZIP=
+STATE_LOADED=false
 
 activity_event() {
     local event=$1 error=${2:-} tag=${3:-} count=${4:-} item=${5:-${ITEM_KEY:-}}
@@ -123,58 +122,91 @@ else
 fi
 
 if [[ ${1:-} == --help || ${1:-} == -h || $# == 0 ]]; then
-    printf '%s\n' 'Usage: zotbridge-run.sh list [--query TEXT] [--tag NAME ...] [--limit 1..100] [--skip N] [--json] [--page-info]' \
+    printf '%s\n' 'Usage: zotbridge-run.sh list [--query TEXT] [--tag NAME ...] [--collection KEY] [--limit 1..100] [--skip N] [--json] [--page-info]' \
+      '                        [--sort title|creator|dateAdded|dateModified] [--direction asc|desc] [--refresh]' \
       '       zotbridge-run.sh tags [--query TEXT] [--json] [--refresh]' \
+      '       zotbridge-run.sh collections [--json] [--refresh]' \
       '       zotbridge-run.sh clear-mappings' \
       '       zotbridge-run.sh settings [--json]' \
       '       zotbridge-run.sh settings-apply' \
-      '       zotbridge-run.sh rmapi-status' \
-      '       zotbridge-run.sh rmapi-pair' \
-      '       zotbridge-run.sh rmapi-repair' \
       '       zotbridge-run.sh activity-log' \
       '       zotbridge-run.sh clear-activity-log' \
-      '       zotbridge-run.sh import --item-key KEY [--target-folder PATH] [--retry-uncertain]' \
+      '       zotbridge-run.sh children --item-key KEY [--json]' \
+      '       zotbridge-run.sh import --item-key KEY [--attachment-key KEY] [--target-folder PATH] [--retry-uncertain] [--include-zotero-tags] [--add-unread-tag]' \
       '       zotbridge-run.sh sync-tagged [--tag to_sync] [--synced-tag synced] [--target-folder PATH]' \
       '       zotbridge-run.sh reverse-sync' \
       '       zotbridge-run.sh sync-all' \
       '       zotbridge-run.sh sync-item --item-key KEY [--tag to_sync] [--synced-tag synced] [--target-folder PATH]' \
       '       zotbridge-run.sh status --item-key KEY' \
       '       zotbridge-run.sh ensure-folder --target-folder PATH' \
-      '       zotbridge-run.sh check-connection [--webdav] [--item-key KEY]'
+      '       zotbridge-run.sh check-connection [--webdav] [--item-key KEY]' \
+      '       zotbridge-run.sh doc-status --uuid RM_UUID' \
+      '       zotbridge-run.sh doc-tags --uuid RM_UUID' \
+      '       zotbridge-run.sh queue-for-zotero --uuid RM_UUID --mode new|attach [--parent-key KEY] [--collection KEY] [--tags a,b,c] [--annotated-only]' \
+      '       zotbridge-run.sh send-to-zotero --uuid RM_UUID --mode new|attach [--parent-key KEY] [--collection KEY] [--tags a,b,c] [--send-plain] [--send-merged] [--send-annotated-only]'
     exit 0
 fi
 COMMAND=$1
 shift
-QUERY= LIMIT=20 SKIP=0 AS_JSON=false PAGE_INFO=false ITEM_KEY= TARGET= RETRY=false
+QUERY= LIMIT= LIMIT_GIVEN=false SKIP=0 AS_JSON=false PAGE_INFO=false ITEM_KEY= TARGET= RETRY=false
 TARGET_GIVEN=false
 REFRESH=false
+COLLECTION=
+SORT=dateModified
+DIRECTION=desc
 QUEUE_TAG=
 SYNCED_TAG=
 QUEUE_TAG_SET=false
 SYNCED_TAG_SET=false
+ATTACHMENT_KEY_OPT=
+INCLUDE_ZOTERO_TAGS=false
+ADD_UNREAD_TAG=false
 TAGS=()
+UUID_OPT=
+QUEUE_MODE=
+QUEUE_PARENT_KEY=
+QUEUE_TAGS_RAW=
+QUEUE_TAGS=()
+QUEUE_ANNOTATED_ONLY=false
+SEND_PLAIN=false
+SEND_MERGED=false
+SEND_ANNOTATED_ONLY=false
 while (($#)); do
     case "$1" in
         --query|-q) [[ $COMMAND =~ ^(list|tags)$ && $# -ge 2 ]] || fail ValueError "Invalid --query option."; QUERY=$2; shift 2 ;;
-        --limit|-n) [[ $COMMAND == list && $# -ge 2 ]] || fail ValueError "Invalid --limit option."; LIMIT=$2; shift 2 ;;
+        --limit|-n) [[ $COMMAND == list && $# -ge 2 ]] || fail ValueError "Invalid --limit option."; LIMIT=$2; LIMIT_GIVEN=true; shift 2 ;;
         --skip|--start) [[ $COMMAND == list && $# -ge 2 ]] || fail ValueError "Invalid --skip option."; SKIP=$2; shift 2 ;;
         --tag|-t)
             [[ $COMMAND =~ ^(list|sync-tagged|sync-item)$ && $# -ge 2 ]] || fail ValueError "Invalid --tag option."
             if [[ $COMMAND == list ]]; then TAGS+=("$2"); else QUEUE_TAG=$2; QUEUE_TAG_SET=true; fi
             shift 2 ;;
+        --collection|-c) [[ $COMMAND =~ ^(list|queue-for-zotero|send-to-zotero)$ && $# -ge 2 ]] || fail ValueError "Invalid --collection option."; COLLECTION=$2; shift 2 ;;
+        --sort) [[ $COMMAND == list && $# -ge 2 ]] || fail ValueError "Invalid --sort option."; SORT=$2; shift 2 ;;
+        --direction) [[ $COMMAND == list && $# -ge 2 ]] || fail ValueError "Invalid --direction option."; DIRECTION=$2; shift 2 ;;
         --synced-tag) [[ $COMMAND =~ ^sync-(tagged|item)$ && $# -ge 2 ]] || fail ValueError "Invalid --synced-tag option."; SYNCED_TAG=$2; SYNCED_TAG_SET=true; shift 2 ;;
         --page-info) [[ $COMMAND == list ]] || fail ValueError "Invalid --page-info option."; PAGE_INFO=true; shift ;;
-        --json) [[ $COMMAND =~ ^(list|tags|settings)$ ]] || fail ValueError "Invalid --json option."; AS_JSON=true; shift ;;
-        --refresh) [[ $COMMAND == tags ]] || fail ValueError "--refresh is only supported by tags."; REFRESH=true; shift ;;
-        --item-key) [[ $COMMAND =~ ^(import|status|check-connection|sync-item)$ && $# -ge 2 ]] || fail ValueError "Invalid --item-key option."; ITEM_KEY=$2; shift 2 ;;
+        --json) [[ $COMMAND =~ ^(list|tags|collections|settings|children)$ ]] || fail ValueError "Invalid --json option."; AS_JSON=true; shift ;;
+        --refresh) [[ $COMMAND =~ ^(tags|collections|list)$ ]] || fail ValueError "--refresh is only supported by tags, collections and list."; REFRESH=true; shift ;;
+        --item-key) [[ $COMMAND =~ ^(import|status|check-connection|sync-item|children)$ && $# -ge 2 ]] || fail ValueError "Invalid --item-key option."; ITEM_KEY=$2; shift 2 ;;
+        --attachment-key) [[ $COMMAND == import && $# -ge 2 ]] || fail ValueError "Invalid --attachment-key option."; ATTACHMENT_KEY_OPT=$2; shift 2 ;;
         --target-folder) [[ $COMMAND =~ ^(import|ensure-folder|sync-tagged|sync-item)$ && $# -ge 2 ]] || fail ValueError "Invalid --target-folder option."; TARGET=$2; TARGET_GIVEN=true; shift 2 ;;
         --webdav) [[ $COMMAND == check-connection ]] || fail ValueError "Invalid --webdav option."; CHECK_WEBDAV=true; shift ;;
         --retry-uncertain) [[ $COMMAND == import ]] || fail ValueError "Invalid --retry-uncertain option."; RETRY=true; shift ;;
+        --include-zotero-tags) [[ $COMMAND == import ]] || fail ValueError "Invalid --include-zotero-tags option."; INCLUDE_ZOTERO_TAGS=true; shift ;;
+        --add-unread-tag) [[ $COMMAND == import ]] || fail ValueError "Invalid --add-unread-tag option."; ADD_UNREAD_TAG=true; shift ;;
+        --uuid) [[ $COMMAND =~ ^(doc-status|doc-tags|queue-for-zotero|send-to-zotero)$ && $# -ge 2 ]] || fail ValueError "Invalid --uuid option."; UUID_OPT=$2; shift 2 ;;
+        --mode) [[ $COMMAND =~ ^(queue-for-zotero|send-to-zotero)$ && $# -ge 2 ]] || fail ValueError "Invalid --mode option."; QUEUE_MODE=$2; shift 2 ;;
+        --parent-key) [[ $COMMAND =~ ^(queue-for-zotero|send-to-zotero)$ && $# -ge 2 ]] || fail ValueError "Invalid --parent-key option."; QUEUE_PARENT_KEY=$2; shift 2 ;;
+        --tags) [[ $COMMAND =~ ^(queue-for-zotero|send-to-zotero)$ && $# -ge 2 ]] || fail ValueError "Invalid --tags option."; QUEUE_TAGS_RAW=$2; shift 2 ;;
+        --annotated-only) [[ $COMMAND == queue-for-zotero ]] || fail ValueError "Invalid --annotated-only option."; QUEUE_ANNOTATED_ONLY=true; shift ;;
+        --send-plain) [[ $COMMAND == send-to-zotero ]] || fail ValueError "Invalid --send-plain option."; SEND_PLAIN=true; shift ;;
+        --send-merged) [[ $COMMAND == send-to-zotero ]] || fail ValueError "Invalid --send-merged option."; SEND_MERGED=true; shift ;;
+        --send-annotated-only) [[ $COMMAND == send-to-zotero ]] || fail ValueError "Invalid --send-annotated-only option."; SEND_ANNOTATED_ONLY=true; shift ;;
         *) fail ValueError "Unknown command option. Use --help." ;;
     esac
 done
-[[ $COMMAND =~ ^(list|tags|clear-mappings|settings|settings-apply|rmapi-status|rmapi-pair|rmapi-repair|activity-log|clear-activity-log|check-connection|ensure-folder|import|status|library|sync-tagged|sync-item|reverse-sync|sync-all)$ ]] || fail ValueError "Unknown command. Use --help."
-if [[ $COMMAND == tags || $COMMAND == clear-mappings ]]; then
+[[ $COMMAND =~ ^(list|tags|collections|clear-mappings|settings|settings-apply|activity-log|clear-activity-log|check-connection|ensure-folder|import|status|library|sync-tagged|sync-item|reverse-sync|sync-all|children|doc-status|doc-tags|queue-for-zotero|send-to-zotero)$ ]] || fail ValueError "Unknown command. Use --help."
+if [[ $COMMAND == tags || $COMMAND == collections || $COMMAND == clear-mappings ]]; then
     for dependency in flock mv; do
         command -v "$dependency" >/dev/null || fail missing_dependency "JSON state operations require utility: $dependency."
     done
@@ -186,13 +218,57 @@ if [[ $COMMAND == ensure-folder || $COMMAND == import || $COMMAND == sync-* || $
     done
     sleep 0.01 || fail missing_dependency "Folder operations require sleep with fractional-second support."
 fi
-[[ $LIMIT =~ ^[0-9]{1,3}$ ]] && ((10#$LIMIT >= 1 && 10#$LIMIT <= 100)) || fail ValueError "limit must be from 1 to 100."
-LIMIT=$((10#$LIMIT))
+if [[ $LIMIT_GIVEN == true ]]; then
+    [[ $LIMIT =~ ^[0-9]{1,3}$ ]] && ((10#$LIMIT >= 1 && 10#$LIMIT <= 100)) || fail ValueError "limit must be from 1 to 100."
+    LIMIT=$((10#$LIMIT))
+fi
 [[ $SKIP =~ ^[0-9]{1,10}$ ]] && ((10#$SKIP <= 2147483647)) ||
     fail ValueError "skip must be from 0 to 2147483647."
 SKIP=$((10#$SKIP))
-if [[ -n $ITEM_KEY || $COMMAND == import || $COMMAND == status || $COMMAND == sync-item ]]; then
+if [[ -n $ITEM_KEY || $COMMAND == import || $COMMAND == status || $COMMAND == sync-item || $COMMAND == children ]]; then
     [[ $ITEM_KEY =~ ^[A-Z0-9]{8}$ ]] || fail ValueError "item-key must contain exactly eight uppercase letters or digits."
+fi
+[[ -z $ATTACHMENT_KEY_OPT ]] || [[ $ATTACHMENT_KEY_OPT =~ ^[A-Z0-9]{8}$ ]] ||
+    fail ValueError "attachment-key must contain exactly eight uppercase letters or digits."
+[[ -z $COLLECTION ]] || [[ $COLLECTION =~ ^[A-Z0-9]{8}$ ]] ||
+    fail ValueError "collection must contain exactly eight uppercase letters or digits."
+[[ $SORT =~ ^(title|creator|dateAdded|dateModified)$ ]] ||
+    fail ValueError "sort must be title, creator, dateAdded or dateModified."
+[[ $DIRECTION =~ ^(asc|desc)$ ]] || fail ValueError "direction must be asc or desc."
+if [[ $COMMAND =~ ^(doc-status|doc-tags|queue-for-zotero|send-to-zotero)$ ]]; then
+    [[ $UUID_OPT =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]] ||
+        fail ValueError "uuid must be a canonical reMarkable document UUID."
+    UUID_OPT=${UUID_OPT,,}
+fi
+if [[ $COMMAND =~ ^(queue-for-zotero|send-to-zotero)$ ]]; then
+    [[ $QUEUE_MODE =~ ^(new|attach)$ ]] ||
+        fail ValueError "mode must be new or attach."
+    if [[ $QUEUE_MODE == attach ]]; then
+        [[ $QUEUE_PARENT_KEY =~ ^[A-Z0-9]{8}$ ]] || fail ValueError "attach mode requires --parent-key KEY."
+    else
+        [[ -z $QUEUE_PARENT_KEY ]] || fail ValueError "--parent-key is only valid with --mode attach."
+    fi
+    [[ -z $COLLECTION || $QUEUE_MODE == new ]] ||
+        fail ValueError "--collection is only valid with --mode new."
+    if [[ -n $QUEUE_TAGS_RAW ]]; then
+        [[ $QUEUE_TAGS_RAW != ,* && $QUEUE_TAGS_RAW != *, && $QUEUE_TAGS_RAW != *,,* ]] ||
+            fail ValueError "tags must be a comma-separated list of nonempty tags without control characters."
+        IFS=',' read -r -a QUEUE_TAGS <<<"$QUEUE_TAGS_RAW"
+        "$JQ" -ne --args '$ARGS.positional | length>0 and all(.[];
+          length>0 and (contains(",")|not) and (test("[\u0000-\u001f\u007f]")|not))' \
+          -- "${QUEUE_TAGS[@]}" >/dev/null ||
+            fail ValueError "tags must be a comma-separated list of nonempty tags without control characters."
+    fi
+    for dependency in flock find md5sum sha256sum cut tr cp grep mv; do
+        command -v "$dependency" >/dev/null || fail missing_dependency "Sending a document to Zotero requires utility: $dependency."
+    done
+fi
+if [[ $COMMAND == send-to-zotero ]]; then
+    # A tags-only call (zero --send-* flags, --tags present) is allowed: it
+    # updates an already-mapped item's tags without sending any new
+    # attachment content, for a mapped document with no markup selected.
+    [[ $SEND_PLAIN == true || $SEND_MERGED == true || $SEND_ANNOTATED_ONLY == true || -n $QUEUE_TAGS_RAW ]] ||
+        fail ValueError "send-to-zotero requires at least one of --send-plain, --send-merged, --send-annotated-only or --tags."
 fi
 if [[ $COMMAND == import || $COMMAND == sync-* || ($COMMAND == check-connection && -n $ITEM_KEY) ]]; then
     for dependency in unzip dd mv; do
@@ -216,9 +292,30 @@ done
 "$JQ" -Rse -f "$ROOT_DIR/scripts/zotbridge-shell-config.jq" "$CONFIG" >"$WORK/config.json" ||
     fail configuration_error "Invalid configuration. Shell backend supports flat keys with JSON-compatible quoted strings, numbers and booleans; no tables, literal/multiline strings or duplicate keys. Check required values and limits."
 get_config() { "$JQ" -r ".$1" "$WORK/config.json"; }
-[[ $TARGET_GIVEN == true ]] || TARGET="$(get_config default_target_folder)"
-[[ $QUEUE_TAG_SET == true ]] || QUEUE_TAG="$(get_config sync_queue_tag)"
-[[ $SYNCED_TAG_SET == true ]] || SYNCED_TAG="$(get_config sync_synced_tag)"
+# jq recompiles its program text on every invocation, which costs several times
+# more than reading one value, so every startup setting is emitted as a quoted
+# shell assignment in a single pass instead of one jq call per key. Every key
+# below is given a non-null default by zotbridge-shell-config.jq.
+"$JQ" -r '
+  {CFG_TARGET:.default_target_folder, CFG_LIMIT:.list_page_limit,
+   CFG_QUEUE_TAG:.sync_queue_tag, CFG_SYNCED_TAG:.sync_synced_tag,
+   CFG_STATE:.state_json_path, CFG_SQLITE_STATE:.state_db_path,
+   CFG_MB_IN:.mb_in_path, CFG_MB_OUT:.mb_out_path, CFG_LIBRARY:.xochitl_dir,
+   CFG_USE_WEBDAV:.use_webdav, CFG_LIBRARY_TYPE:.library_type,
+   CFG_LIBRARY_ID:.library_id, CFG_BROKER_TIMEOUT:.broker_timeout_s,
+   CFG_ZOTERO_TIMEOUT:.zotero_timeout_s, CFG_WEBDAV_TIMEOUT:.webdav_timeout_s,
+   CFG_ZOTERO_MAX_MB:.zotero_max_download_mb, CFG_WEBDAV_MAX_MB:.webdav_max_download_mb,
+   CFG_LIST_CACHE_TTL:.list_cache_ttl_s}
+  | to_entries
+  | if all(.[]; .value != null) then . else error("missing configuration value") end
+  | .[] | "\(.key)=\(.value|tostring|@sh)"' "$WORK/config.json" >"$WORK/config.env" ||
+    fail configuration_error "Invalid configuration. Shell backend supports flat keys with JSON-compatible quoted strings, numbers and booleans; no tables, literal/multiline strings or duplicate keys. Check required values and limits."
+# shellcheck disable=SC1091
+source "$WORK/config.env"
+[[ $TARGET_GIVEN == true ]] || TARGET=$CFG_TARGET
+[[ $LIMIT_GIVEN == true ]] || LIMIT=$CFG_LIMIT
+[[ $QUEUE_TAG_SET == true ]] || QUEUE_TAG=$CFG_QUEUE_TAG
+[[ $SYNCED_TAG_SET == true ]] || SYNCED_TAG=$CFG_SYNCED_TAG
 absolute_path() {
     case "$1" in
         "~/"*) REPLY="$HOME/${1:2}" ;;
@@ -226,10 +323,15 @@ absolute_path() {
         *) REPLY="$CONFIG_DIR/$1" ;;
     esac
 }
-absolute_path "$(get_config state_json_path)"; STATE=$REPLY
-absolute_path "$(get_config state_db_path)"; SQLITE_STATE=$REPLY
+absolute_path "$CFG_STATE"; STATE=$REPLY
+absolute_path "$CFG_SQLITE_STATE"; SQLITE_STATE=$REPLY
 [[ $STATE != "$SQLITE_STATE" ]] || fail configuration_error "state_json_path must differ from state_db_path; SQLite files are never migrated or overwritten."
 ACTIVITY_LOG="$STATE.activity.jsonl"
+# Listing pages are cached beside the state file rather than inside it, so a
+# large page cache can never put the import mappings at risk.
+LIST_CACHE="$STATE.list-cache.json"
+LIST_CACHE_TTL=$CFG_LIST_CACHE_TTL
+LIST_CACHE_MAX_ENTRIES=60
 [[ ! -L $ACTIVITY_LOG ]] || fail activity_log_error "Activity log must not be a symbolic link."
 [[ ! -e $ACTIVITY_LOG || -f $ACTIVITY_LOG ]] ||
     fail activity_log_error "Activity log must be a regular file."
@@ -237,11 +339,11 @@ mkdir -p -- "$(dirname -- "$ACTIVITY_LOG")" ||
     fail activity_log_error "Cannot create the activity log directory."
 ACTIVITY_READY=true
 [[ $COMMAND =~ ^(sync-tagged|reverse-sync|sync-all)$ ]] || activity_event started
-if [[ -n ${ZOTBRIDGE_RMAPI:-} ]]; then
-    [[ -x $ZOTBRIDGE_RMAPI ]] || fail missing_dependency "ZOTBRIDGE_RMAPI must name an executable rmapi binary."
-    RMAPI=$ZOTBRIDGE_RMAPI
-elif [[ -x $ROOT_DIR/bin/rmapi ]]; then
-    RMAPI="$ROOT_DIR/bin/rmapi"
+if [[ -n ${ZOTBRIDGE_LOCALGETA:-} ]]; then
+    [[ -x $ZOTBRIDGE_LOCALGETA ]] || fail missing_dependency "ZOTBRIDGE_LOCALGETA must name an executable zotbridge-localgeta binary."
+    LOCALGETA=$ZOTBRIDGE_LOCALGETA
+elif [[ -x $ROOT_DIR/bin/zotbridge-localgeta ]]; then
+    LOCALGETA="$ROOT_DIR/bin/zotbridge-localgeta"
 fi
 if [[ -n ${ZOTBRIDGE_7ZZ:-} ]]; then
     [[ -x $ZOTBRIDGE_7ZZ ]] || fail missing_dependency "ZOTBRIDGE_7ZZ must name an executable 7zz binary."
@@ -249,46 +351,59 @@ if [[ -n ${ZOTBRIDGE_7ZZ:-} ]]; then
 elif [[ -x $ROOT_DIR/bin/7zz ]]; then
     SEVEN_ZIP="$ROOT_DIR/bin/7zz"
 fi
-RMAPI_CONFIG="${ZOTBRIDGE_RMAPI_CONFIG:-$ROOT_DIR/.rmapi}"
-RMAPI_PAIR_DRAFT="${ZOTBRIDGE_RMAPI_PAIR_DRAFT:-$ROOT_DIR/.zotbridge-rmapi-pair-draft.json}"
-absolute_path "$(get_config mb_in_path)"; MB_IN=$REPLY
-absolute_path "$(get_config mb_out_path)"; MB_OUT=$REPLY
-absolute_path "$(get_config xochitl_dir)"; LIBRARY=$REPLY
-USE_WEBDAV="$(get_config use_webdav)"
-LIBRARY_TYPE="$(get_config library_type)"
-LIBRARY_ID="$(get_config library_id)"
+absolute_path "$CFG_MB_IN"; MB_IN=$REPLY
+absolute_path "$CFG_MB_OUT"; MB_OUT=$REPLY
+absolute_path "$CFG_LIBRARY"; LIBRARY=$REPLY
+USE_WEBDAV=$CFG_USE_WEBDAV
+LIBRARY_TYPE=$CFG_LIBRARY_TYPE
+LIBRARY_ID=$CFG_LIBRARY_ID
 API="https://api.zotero.org/${LIBRARY_TYPE}s/$LIBRARY_ID"
 LIBRARY_SCOPE="$LIBRARY_TYPE:$LIBRARY_ID"
-BROKER_TIMEOUT="$(get_config broker_timeout_s)"
-ZOTERO_TIMEOUT="$(get_config zotero_timeout_s)"
-WEBDAV_TIMEOUT="$(get_config webdav_timeout_s)"
-MAX_BYTES=$(($(get_config zotero_max_download_mb) * 1024 * 1024))
-[[ $USE_WEBDAV != true ]] || MAX_BYTES=$(($(get_config webdav_max_download_mb) * 1024 * 1024))
+BROKER_TIMEOUT=$CFG_BROKER_TIMEOUT
+ZOTERO_TIMEOUT=$CFG_ZOTERO_TIMEOUT
+WEBDAV_TIMEOUT=$CFG_WEBDAV_TIMEOUT
+MAX_BYTES=$((CFG_ZOTERO_MAX_MB * 1024 * 1024))
+[[ $USE_WEBDAV != true ]] || MAX_BYTES=$((CFG_WEBDAV_MAX_MB * 1024 * 1024))
 
 lock_state() {
     mkdir -p -- "$(dirname -- "$STATE")"
     exec {json_lock}>>"$STATE.lock"
     flock -n "$json_lock" || fail busy "Another operation is using this JSON state; try later."
+    # Any snapshot read before the lock may predate another writer's commit.
+    STATE_LOADED=false
 }
 load_state() {
+    # Validating and normalising in one jq pass halves the per-load cost, and the
+    # snapshot is reused for the rest of the run. lock_state clears STATE_LOADED
+    # so the first load after taking the lock always re-reads from disk.
+    [[ $STATE_LOADED != true ]] || return 0
     [[ ! -L $STATE ]] || fail state_error "JSON state must not be a symbolic link."
     if [[ -e $STATE ]]; then
         [[ -f $STATE ]] || fail state_error "JSON state must be a regular file."
-        "$JQ" -se '
+        "$JQ" -s '
           def cache_valid:
             type=="object" and all(.[];
               type=="object" and all(.[];
                 type=="object"
                 and (.fetched_at | type=="number" and .>=0 and floor==.)
                 and (.tags | type=="array" and all(.[]; type=="string") and .==unique)));
-          length==1 and (.[0] | type=="object" and .version==1
+          def collection_cache_valid:
+            type=="object" and all(.[];
+              type=="object"
+              and (.fetched_at | type=="number" and .>=0 and floor==.)
+              and (.collections | type=="array" and all(.[];
+                type=="object" and (.key|type=="string") and (.name|type=="string"))));
+          if length==1 and (.[0] | type=="object" and .version==1
             and (.mappings|type=="object") and (.attempts|type=="object")
-            and (if has("tag_cache") then (.tag_cache|cache_valid) else true end))' "$STATE" >/dev/null ||
+            and (if has("tag_cache") then (.tag_cache|cache_valid) else true end)
+            and (if has("collection_cache") then (.collection_cache|collection_cache_valid) else true end))
+          then .[0] | (.tag_cache //= {} | .collection_cache //= {})
+          else error("invalid json state") end' "$STATE" >"$WORK/state.json" ||
             fail state_error "Invalid JSON state. Existing SQLite state is separate and is not automatically migrated."
-        "$JQ" '.tag_cache //= {}' "$STATE" >"$WORK/state.json"
     else
-        printf '%s\n' '{"version":1,"mappings":{},"attempts":{},"tag_cache":{}}' >"$WORK/state.json"
+        printf '%s\n' '{"version":1,"mappings":{},"attempts":{},"tag_cache":{},"collection_cache":{}}' >"$WORK/state.json"
     fi
+    STATE_LOADED=true
 }
 save_state() {
     # Staging in the destination directory keeps rename atomic across filesystems.
@@ -369,56 +484,8 @@ clear_activity_log() {
     ACTIVITY_LOGGED=true
     "$JQ" -cn --argjson cleared "$cleared" '{ok:true,cleared:$cleared}'
 }
-rmapi_paired() {
-    [[ -n $RMAPI && -f $RMAPI_CONFIG && ! -L $RMAPI_CONFIG && -s $RMAPI_CONFIG ]]
-}
-print_rmapi_status() {
-    local installed=false paired=false
-    [[ -n $RMAPI ]] && installed=true
-    rmapi_paired && paired=true
-    "$JQ" -cn --argjson installed "$installed" --argjson paired "$paired" \
-      '{ok:true,rmapi:{installed:$installed,paired:$paired}}'
-}
 show_settings() {
-    local installed=false paired=false
-    [[ -n $RMAPI ]] && installed=true
-    rmapi_paired && paired=true
-    "$JQ" --arg mode public --argjson draft '[]' -cf "$ROOT_DIR/scripts/zotbridge-shell-settings.jq" "$WORK/config.json" |
-      "$JQ" -c --argjson installed "$installed" --argjson paired "$paired" \
-        '. + {rmapi:{installed:$installed,paired:$paired}}'
-}
-pair_rmapi() {
-    local replace=${1:-false} code= candidate="$WORK/rmapi-config" output="$WORK/rmapi-pair-output"
-    [[ ! -L $RMAPI_CONFIG && ! -L $RMAPI_PAIR_DRAFT ]] ||
-      fail rmapi_pair_error "rmapi configuration and pairing draft must not be symbolic links."
-    [[ -f $RMAPI_PAIR_DRAFT ]] || fail rmapi_pair_error "Missing rmapi pairing draft."
-    if [[ -z $RMAPI ]]; then
-        rm -f -- "$RMAPI_PAIR_DRAFT"
-        fail missing_dependency "The bundled rmapi binary is required for reMarkable Cloud pairing."
-    fi
-    if [[ -e $RMAPI_CONFIG && $replace != true ]]; then
-        rm -f -- "$RMAPI_PAIR_DRAFT"
-        fail already_paired "rmapi is already paired; resetting it must be an explicit separate operation."
-    fi
-    code="$("$JQ" -rse '
-      if length==1 and (.[0]|type=="object" and .version==1
-        and (.code|type=="string" and test("^[A-Za-z0-9]{8}$"))
-        and ((keys|sort)==["code","version"]))
-      then .[0].code else error("invalid pairing draft") end' "$RMAPI_PAIR_DRAFT")" || {
-        rm -f -- "$RMAPI_PAIR_DRAFT"
-        fail rmapi_pair_error "Pairing code must contain exactly eight letters or digits."
-    }
-    rm -f -- "$RMAPI_PAIR_DRAFT"
-    (
-      printf '%s\n' "$code" |
-        RMAPI_CONFIG="$candidate" "$RMAPI" ls >"$output" 2>/dev/null
-    ) || fail rmapi_pair_error "reMarkable Cloud pairing failed. Generate a new one-time code and retry."
-    [[ -f $candidate && ! -L $candidate && -s $candidate ]] ||
-      fail rmapi_pair_error "rmapi did not create a valid private configuration."
-    chmod 600 "$candidate"
-    mv -f -- "$candidate" "$RMAPI_CONFIG"
-    ACTIVITY_LOGGED=true
-    printf '%s\n' '{"ok":true,"rmapi":{"installed":true,"paired":true}}'
+    "$JQ" --arg mode public --argjson draft '[]' -cf "$ROOT_DIR/scripts/zotbridge-shell-settings.jq" "$WORK/config.json"
 }
 apply_settings() {
     local draft="$CONFIG_DIR/.zotbridge-settings-draft.json" stage=
@@ -524,6 +591,31 @@ find_attachment() {
     done
 }
 
+list_pdf_attachments() {
+    local start=0 count
+    : >"$WORK/child-pdfs.jsonl"
+    while :; do
+        metadata "items/$ITEM_KEY/children?limit=100&start=$start" "$WORK/children.json"
+        "$JQ" -e 'type=="array"' "$WORK/children.json" >/dev/null || fail zotero_error "Invalid attachment metadata."
+        "$JQ" -c '.[]|select(.data.contentType=="application/pdf" and
+          (.data.linkMode=="imported_file" or .data.linkMode=="imported_url"))
+          |{attachment_key:.data.key,title:((.data.title // .data.filename // "")|tostring)}' \
+          "$WORK/children.json" >>"$WORK/child-pdfs.jsonl"
+        count="$("$JQ" 'length' "$WORK/children.json")"
+        ((count == 100)) || break
+        start=$((start + count))
+        ((start < 10000)) || fail zotero_error "Attachment pagination exceeded the safety limit."
+    done
+    "$JQ" -se --arg key "$ITEM_KEY" '
+      if map(.attachment_key) | all(test("^[A-Z0-9]{8}$")) then
+        {ok:true,item_key:$key,attachments:.}
+      else error("invalid attachment key") end' \
+      "$WORK/child-pdfs.jsonl" >"$WORK/children-result.json" ||
+      fail zotero_error "Zotero returned an invalid attachment key."
+    if [[ $AS_JSON == true ]]; then "$JQ" '.' "$WORK/children-result.json"
+    else "$JQ" -r '.attachments[]|[.attachment_key,.title]|@tsv' "$WORK/children-result.json"; fi
+}
+
 total_results() {
     TOTAL_RESULTS="$("$JQ" -Rse '[split("\n")[] | select(ascii_downcase | startswith("total-results:"))
       | capture("^Total-Results:[ \t]*(?<value>[0-9]+)[ \t\r]*$";"i")
@@ -531,8 +623,61 @@ total_results() {
       fail zotero_error "Zotero response is missing a valid Total-Results header."
 }
 
+list_cache_get() {
+    # Returns 0 and fills $WORK/items.jsonl when a fresh entry exists. The cache
+    # stores the projected Zotero fields only; import mappings are re-applied
+    # from live state afterwards, so a cached page still shows current badges.
+    LIST_CACHE_TOTAL=0
+    [[ $REFRESH == false ]] || return 1
+    ((LIST_CACHE_TTL > 0)) || return 1
+    [[ -f $LIST_CACHE && ! -L $LIST_CACHE ]] || return 1
+    LIST_CACHE_TOTAL="$("$JQ" -e --arg key "$LIBRARY_SCOPE|$1" --argjson ttl "$LIST_CACHE_TTL" '
+      (.entries[$key] // empty)
+      | select((.fetched_at|type=="number") and (now - .fetched_at) < $ttl and (.items|type=="array"))
+      | .total' "$LIST_CACHE" 2>/dev/null)" || return 1
+    [[ $LIST_CACHE_TOTAL =~ ^[0-9]+$ ]] || return 1
+    "$JQ" -c --arg key "$LIBRARY_SCOPE|$1" '.entries[$key].items[]' \
+      "$LIST_CACHE" >"$WORK/items.jsonl" 2>/dev/null || return 1
+    return 0
+}
+
+list_cache_put() {
+    # Best effort: a cache write must never fail a listing that already
+    # succeeded. Concurrent writers (the UI page and the background walk run at
+    # the same time) are last-writer-wins, which can only lose an entry that is
+    # then refetched later, never corrupt the file.
+    ((LIST_CACHE_TTL > 0)) || return 0
+    [[ ! -L $LIST_CACHE ]] || return 0
+    local stage
+    stage="$LIST_CACHE.new.$$.$RANDOM"
+    if [[ -f $LIST_CACHE ]]; then
+        "$JQ" '.' "$LIST_CACHE" >"$WORK/list-cache.json" 2>/dev/null ||
+          printf '%s\n' '{"version":1,"entries":{}}' >"$WORK/list-cache.json"
+    else
+        printf '%s\n' '{"version":1,"entries":{}}' >"$WORK/list-cache.json"
+    fi    # Every step is guarded: `set -Eeuo pipefail` installs an ERR trap, so an
+    # unguarded failure here (a missing `mv`, a full disk) would abort a
+    # listing that has already succeeded.
+    if "$JQ" --arg key "$LIBRARY_SCOPE|$1" --argjson total "$2" \
+      --argjson ttl "$LIST_CACHE_TTL" --argjson max "$LIST_CACHE_MAX_ENTRIES" \
+      --slurpfile items "$WORK/items.jsonl" '
+      def entries_object: (if type=="object" then . else {} end);
+      {version:1,
+       entries: ((.entries|entries_object)
+         + {($key): {fetched_at:(now|floor), total:$total, items:$items}}
+         | with_entries(select((.value.fetched_at|type=="number")
+             and (now - .value.fetched_at) < $ttl))
+         | to_entries | sort_by(.value.fetched_at) | reverse | .[:$max] | from_entries)}' \
+      "$WORK/list-cache.json" >"$stage" 2>/dev/null; then
+        mv -f -- "$stage" "$LIST_CACHE" 2>/dev/null || rm -f -- "$stage" 2>/dev/null || :
+    else
+        rm -f -- "$stage" 2>/dev/null || :
+    fi
+    return 0
+}
+
 list_zotero_library() {
-    local encoded_query paper key has_pdf tag_parameter= encoded_tags total count next_skip
+    local encoded_query tag_parameter= encoded_tags total count next_skip base_path request_path
     load_state
     encoded_query="$(printf '%s' "$QUERY" | "$JQ" -Rrs '@uri')"
     if ((${#TAGS[@]})); then
@@ -545,40 +690,63 @@ list_zotero_library() {
           fail ValueError "Tags must be nonempty literal names without controls, '||', or a leading backslash-hyphen."
         tag_parameter="&tag=$encoded_tags"
     fi
+    base_path="items/top"
+    [[ -z $COLLECTION ]] || base_path="collections/$COLLECTION/items/top"
     # Zotero permits one itemType parameter; leading '-' negates the OR group.
-    metadata "items/top?limit=$LIMIT&start=$SKIP&q=$encoded_query&itemType=-attachment%20%7C%7C%20note%20%7C%7C%20annotation&sort=dateModified&direction=desc$tag_parameter" "$WORK/items.json"
-    "$JQ" -e 'type=="array"' "$WORK/items.json" >/dev/null || fail zotero_error "Invalid item list."
-    total_results
-    total=$TOTAL_RESULTS
-    count="$("$JQ" 'length' "$WORK/items.json")"
-    ((count <= LIMIT)) || fail zotero_error "Zotero returned an oversized page."
+    request_path="$base_path?limit=$LIMIT&start=$SKIP&q=$encoded_query&itemType=-attachment%20%7C%7C%20note%20%7C%7C%20annotation&sort=$SORT&direction=$DIRECTION$tag_parameter"
+    if list_cache_get "$request_path"; then
+        total=$LIST_CACHE_TOTAL
+        count="$("$JQ" -s 'length' "$WORK/items.jsonl")"
+    else
+        metadata "$request_path" "$WORK/items.json"
+        "$JQ" -e 'type=="array"' "$WORK/items.json" >/dev/null || fail zotero_error "Invalid item list."
+        total_results
+        total=$TOTAL_RESULTS
+        count="$("$JQ" 'length' "$WORK/items.json")"
+        ((count <= LIMIT)) || fail zotero_error "Zotero returned an oversized page."
+        "$JQ" -c '.[]|select(.data.itemType!="attachment" and .data.itemType!="note" and .data.itemType!="annotation")
+          |{key:.data.key,title:.data.title,date:.data.date,creator:(.meta.creatorSummary // ""),
+            dateAdded:(.data.dateAdded // ""),dateModified:(.data.dateModified // ""),
+            numChildren:(.meta.numChildren // 0)}' \
+          "$WORK/items.json" >"$WORK/items.jsonl"
+        list_cache_put "$request_path" "$total"
+    fi
     next_skip=null
     if ((SKIP + count < total)); then
         ((count > 0)) || fail zotero_error "Zotero returned an empty page before the end; refresh the listing."
         next_skip=$((SKIP + count))
     fi
-    "$JQ" -c '.[]|.data|select(.itemType!="attachment" and .itemType!="note" and .itemType!="annotation")' \
-      "$WORK/items.json" >"$WORK/items.jsonl"
     : >"$WORK/papers.jsonl"
-    while IFS= read -r paper; do
-        printf '%s\n' "$paper" >"$WORK/paper.json"
-        key="$("$JQ" -r '.key' "$WORK/paper.json")"
-        [[ $key =~ ^[A-Z0-9]{8}$ ]] || fail zotero_error "Zotero returned an invalid item key."
-        find_mapping "$key"
-        find_attachment "$key"
-        has_pdf=false; [[ -z $ATTACHMENT ]] || has_pdf=true
-        "$JQ" -c --argjson pdf "$has_pdf" --arg scope "$LIBRARY_SCOPE" --arg key "$key" \
-          --slurpfile mapping "$WORK/mapping.json" --slurpfile state "$WORK/state.json" '
-          {item_key:.key,title:((.title // "")|gsub("^\\s+|\\s+$";"")),
-           year:((.date // "")|tostring|gsub("^\\s+|\\s+$";"")),has_pdf:$pdf,
-           mapping:$mapping[0],attempt:($state[0].attempts[$scope][$key] // null)}' "$WORK/paper.json" >>"$WORK/papers.jsonl"
-    done <"$WORK/items.jsonl"
+    # One jq pass over the whole page: the previous per-item loop ran four jq
+    # invocations per result, and each invocation recompiles the program and
+    # reparses the state snapshot. Key validation stays a separate pass so an
+    # invalid key is still reported as a Zotero error rather than a state error.
+    "$JQ" -se 'all(.[]; type=="object"
+      and (.key|type=="string" and test("^[A-Z0-9]{8}$"))
+      and (.numChildren|type=="number"))' "$WORK/items.jsonl" >/dev/null ||
+      fail zotero_error "Zotero returned an invalid item key."
+    "$JQ" -L "$ROOT_DIR/scripts" -c --arg type "$LIBRARY_TYPE" --arg library "$LIBRARY_ID" \
+      --arg scope "$LIBRARY_SCOPE" --slurpfile state "$WORK/state.json" '
+      include "zotbridge-shell-mapping";
+      ($state[0]) as $st | . as $item | $item.key as $key
+      | {item_key:$key,
+         title:(($item.title // "")|gsub("^\\s+|\\s+$";"")),
+         year:(($item.date // "")|tostring|gsub("^\\s+|\\s+$";"")),
+         creator:(($item.creator // "")|tostring|gsub("^\\s+|\\s+$";"")),
+         date_added:(($item.dateAdded // "")|tostring),
+         date_modified:(($item.dateModified // "")|tostring),
+         has_pdf:($item.numChildren > 0),
+         num_children:$item.numChildren,
+         mapping:($st | mapping_for_item($type; $library; $key)),
+         attempt:($st.attempts[$scope][$key] // null)}' \
+      "$WORK/items.jsonl" >"$WORK/papers.jsonl" ||
+      fail state_error "Cannot look up the import: conflicting or legacy mapping data requires explicit migration."
     if [[ $PAGE_INFO == true ]]; then
         "$JQ" -s --argjson skip "$SKIP" --argjson limit "$LIMIT" --argjson total "$total" \
           --argjson next "$next_skip" '{ok:true,items:.,pagination:{
             skip:$skip,limit:$limit,total:$total,has_more:($next!=null),next_skip:$next}}' "$WORK/papers.jsonl"
     elif [[ $AS_JSON == true ]]; then "$JQ" -s '.' "$WORK/papers.jsonl"
-    else "$JQ" -r '[.item_key,(if .has_pdf then "PDF" else "NO_PDF" end),.year,.title]|@tsv' "$WORK/papers.jsonl"; fi
+    else "$JQ" -r '[.item_key,("files~" + (.num_children|tostring)),.year,.title]|@tsv' "$WORK/papers.jsonl"; fi
 }
 
 list_zotero_tags() {
@@ -620,6 +788,60 @@ list_zotero_tags() {
 print_zotero_tags() {
     if [[ $AS_JSON == true ]]; then "$JQ" '.' "$WORK/tag-names.json"
     else "$JQ" -r '.[]' "$WORK/tag-names.json"; fi
+}
+fetch_collection_index() {
+    local start=0 count total
+    : >"$WORK/collections.jsonl"
+    while :; do
+        # "collections" (not "collections/top") so subcollections are included;
+        # each record carries parentCollection, which is false at the top level.
+        # Unlike collections/top, this endpoint also returns trashed
+        # collections, so .deleted entries must be dropped explicitly.
+        metadata "collections?limit=100&start=$start" "$WORK/collections.json"
+        "$JQ" -e 'type=="array" and all(.[]; .data.key|type=="string")' "$WORK/collections.json" >/dev/null ||
+            fail zotero_error "Zotero returned invalid collection data."
+        total_results
+        total=$TOTAL_RESULTS
+        count="$("$JQ" 'length' "$WORK/collections.json")"
+        ((count <= 100)) || fail zotero_error "Zotero returned an oversized collection page."
+        "$JQ" -c '.[]|.data|select((.key|test("^[A-Z0-9]{8}$")) and ((.deleted // false)|not))
+          |{key:.key,name:((.name // "")|tostring|gsub("^\\s+|\\s+$";"")),
+            parent:((.parentCollection // "")|if type=="string" and test("^[A-Z0-9]{8}$")
+                    then . else "" end)}' \
+          "$WORK/collections.json" >>"$WORK/collections.jsonl"
+        start=$((start + count))
+        ((start < total)) || break
+        ((count > 0)) || fail zotero_error "Zotero returned an empty collection page before the end; retry."
+    done
+    "$JQ" -s 'sort_by(.name)' "$WORK/collections.jsonl" >"$WORK/collection-names.json"
+}
+list_zotero_collections() {
+    lock_state
+    load_state
+    # collections_version gates the cache: version 1 entries carried only
+    # top-level collections and no parent keys, and version 2 additionally
+    # included trashed collections, so older caches must be refetched rather
+    # than silently hiding subcollections or showing deleted ones.
+    if [[ $REFRESH == false ]] && "$JQ" -e --arg scope "$LIBRARY_SCOPE" \
+      '.collection_cache[$scope].collections_version == 3' "$WORK/state.json" >/dev/null; then
+        "$JQ" --arg scope "$LIBRARY_SCOPE" \
+          '.collection_cache[$scope].collections' "$WORK/state.json" >"$WORK/collection-names.json"
+        exec {json_lock}>&-
+        print_zotero_collections
+        return
+    fi
+    fetch_collection_index
+    "$JQ" --arg scope "$LIBRARY_SCOPE" --slurpfile collections "$WORK/collection-names.json" \
+      '.collection_cache[$scope]={fetched_at:(now|floor),collections_version:3,
+        collections:$collections[0]}' \
+      "$WORK/state.json" >"$WORK/state-next.json"
+    save_state
+    exec {json_lock}>&-
+    print_zotero_collections
+}
+print_zotero_collections() {
+    if [[ $AS_JSON == true ]]; then "$JQ" '.' "$WORK/collection-names.json"
+    else "$JQ" -r '.[]|[.key,.name,(.parent // "")]|@tsv' "$WORK/collection-names.json"; fi
 }
 pdf_valid() {
     [[ -f $1 ]] || return 1
@@ -783,6 +1005,85 @@ broker() {
     BROKER_REPLY=$reply
 }
 
+doc_status() {
+    local uuid=$1 title= item_key attachment_key updated_at stale=false
+    load_state
+    "$JQ" -c --arg uuid "$uuid" '.mappings[$uuid] // null' "$WORK/state.json" >"$WORK/doc-status-mapping.json"
+    if "$JQ" -e '.==null' "$WORK/doc-status-mapping.json" >/dev/null; then
+        "$JQ" -cn --arg uuid "$uuid" '{ok:true,rm_uuid:$uuid,mapped:false}'
+        return
+    fi
+    item_key="$("$JQ" -r '.zotero_item_key' "$WORK/doc-status-mapping.json")"
+    attachment_key="$("$JQ" -r '.zotero_attachment_key' "$WORK/doc-status-mapping.json")"
+    updated_at="$("$JQ" -r '.updated_at' "$WORK/doc-status-mapping.json")"
+    if [[ $item_key =~ ^[A-Z0-9]{8}$ ]]; then
+        request zotero "$API/items/$item_key" "$WORK/doc-status-item.json" 8388608 "$ZOTERO_TIMEOUT"
+        if [[ $HTTP_CODE == 200 ]] && "$JQ" -e '.' "$WORK/doc-status-item.json" >/dev/null 2>&1; then
+            # A trashed item still answers 200, so treat .data.deleted as gone too:
+            # the link is unusable for further uploads either way.
+            if "$JQ" -e '(.data.deleted // false)==true' "$WORK/doc-status-item.json" >/dev/null 2>&1; then
+                stale=true
+            else
+                title="$("$JQ" -r '.data.title // ""' "$WORK/doc-status-item.json")"
+            fi
+        elif [[ $HTTP_CODE == 404 || $HTTP_CODE == 410 ]]; then
+            stale=true
+        fi
+    else
+        stale=true
+    fi
+    # Only a definitive "this key is gone" answer drops the link. Network
+    # failures, auth errors and rate limits leave HTTP_CODE at something else
+    # and must keep the mapping intact, or an offline tablet would silently
+    # unlink every document it looked at.
+    if [[ $stale == true ]] && drop_stale_mapping "$uuid" "$item_key"; then
+        "$JQ" -cn --arg uuid "$uuid" --arg item "$item_key" \
+          '{ok:true,rm_uuid:$uuid,mapped:false,unlinked:true,stale_zotero_item_key:$item}'
+        return
+    fi
+    "$JQ" -cn --arg uuid "$uuid" --arg item "$item_key" --arg attachment "$attachment_key" \
+      --arg title "$title" --arg updated "$updated_at" \
+      '{ok:true,rm_uuid:$uuid,mapped:true,zotero_item_key:$item,zotero_attachment_key:$attachment,
+        zotero_item_title:$title,updated_at:$updated}'
+}
+
+# Removes a document's Zotero linkage after the linked item has been confirmed
+# missing (404/410, trashed, or a structurally invalid key). Best-effort: a
+# busy lock or a mapping that vanished underneath us returns non-zero so the
+# caller keeps reporting the existing mapping rather than claiming an unlink
+# that did not happen.
+drop_stale_mapping() {
+    local uuid=$1 stale_item=${2:-}
+    exec {json_lock}>>"$STATE.lock"
+    flock -n "$json_lock" || { exec {json_lock}>&-; return 1; }
+    load_state
+    if ! "$JQ" -L "$ROOT_DIR/scripts" --arg uuid "$uuid" \
+      'include "zotbridge-shell-mapping"; drop_mapping($uuid)' \
+      "$WORK/state.json" >"$WORK/state-next.json"; then
+        exec {json_lock}>&-
+        return 1
+    fi
+    save_state
+    exec {json_lock}>&-
+    activity_event failed stale_zotero_link "" "" "$stale_item"
+    return 0
+}
+doc_tags() {
+    local uuid=$1
+    local metadata_path="$LIBRARY/$uuid.metadata"
+    [[ -f $metadata_path && ! -L $metadata_path ]] ||
+        fail FileNotFoundError "No reMarkable document found with that UUID."
+    "$JQ" -e 'type=="object" and .type=="DocumentType" and (.deleted // false)==false' \
+      "$metadata_path" >/dev/null ||
+        fail FileNotFoundError "That reMarkable UUID is not an active document."
+    "$JQ" -c --arg uuid "$uuid" '{ok:true,rm_uuid:$uuid,
+      rm_title:(.visibleName // ""),
+      tags:((.tags // [])
+        | map(if type=="object" then (.name // empty) elif type=="string" then . else empty end)
+        | map(select(length>0)) | unique)}' "$metadata_path" ||
+        fail state_error "reMarkable document metadata could not be read."
+}
+
 library_list() {
     [[ -d $LIBRARY ]] || fail FileNotFoundError "reMarkable library directory not found."
     : >"$WORK/library.jsonl"
@@ -808,16 +1109,19 @@ source "$ROOT_DIR/scripts/zotbridge-shell-reverse.sh"
 case "$COMMAND" in
     settings) ACTIVITY_LOGGED=true; show_settings ;;
     settings-apply) apply_settings ;;
-    rmapi-status) ACTIVITY_LOGGED=true; print_rmapi_status ;;
-    rmapi-pair) pair_rmapi false ;;
-    rmapi-repair) pair_rmapi true ;;
     activity-log) ACTIVITY_LOGGED=true; print_activity_log ;;
     clear-activity-log) clear_activity_log ;;
     sync-tagged) sync_tagged || { ACTIVITY_LOGGED=true; exit 1; } ;;
     reverse-sync)
-        reverse_sync >"$WORK/reverse-command-result.json"
-        "$JQ" '.' "$WORK/reverse-command-result.json"
-        "$JQ" -e '.ok' "$WORK/reverse-command-result.json" >/dev/null ||
+        # Captured via command substitution (a subshell) rather than redirected to a
+        # WORK file: fail() calls exit, which would otherwise only terminate the whole
+        # process before this case block could print the WORK file back out, leaving
+        # any internal failure (e.g. broker unavailable) completely silent on stdout.
+        reverse_result="$(reverse_sync)" || true
+        [[ -n $reverse_result ]] ||
+          reverse_result='{"ok":false,"error":"runtime_error","message":"reverse-sync produced no output; check the activity log."}'
+        printf '%s\n' "$reverse_result" | "$JQ" '.'
+        printf '%s\n' "$reverse_result" | "$JQ" -e '.ok' >/dev/null ||
           { ACTIVITY_LOGGED=true; exit 1; }
         ACTIVITY_LOGGED=true
         ;;
@@ -826,6 +1130,17 @@ case "$COMMAND" in
         ACTIVITY_LOGGED=true
         ;;
     sync-item) sync_item ;;
+    doc-status) ACTIVITY_LOGGED=true; doc_status "$UUID_OPT" ;;
+    doc-tags) ACTIVITY_LOGGED=true; doc_tags "$UUID_OPT" ;;
+    queue-for-zotero)
+        ACTIVITY_LOGGED=true
+        queue_for_zotero "$UUID_OPT" "$QUEUE_MODE" "$QUEUE_PARENT_KEY" "$COLLECTION" "$QUEUE_TAGS_RAW" "$QUEUE_ANNOTATED_ONLY"
+        ;;
+    send-to-zotero)
+        ACTIVITY_LOGGED=true
+        send_to_zotero "$UUID_OPT" "$QUEUE_MODE" "$QUEUE_PARENT_KEY" "$COLLECTION" "$QUEUE_TAGS_RAW" \
+          "$SEND_PLAIN" "$SEND_MERGED" "$SEND_ANNOTATED_ONLY" || { ACTIVITY_LOGGED=true; exit 1; }
+        ;;
     clear-mappings) clear_state_mappings ;;
     ensure-folder)
         validate_target_folder
@@ -834,7 +1149,9 @@ case "$COMMAND" in
           '{ok:true,folder_path:$path,folder_uuid:$uuid}'
         ;;
     tags) list_zotero_tags ;;
+    collections) list_zotero_collections ;;
     library) library_list ;;
+    children) list_pdf_attachments ;;
     status)
         load_state
         find_mapping
@@ -876,7 +1193,36 @@ case "$COMMAND" in
           '.attempts[$scope][$key]!=null' "$WORK/state.json" >/dev/null; then
             fail import_uncertain "A previous import was not confirmed. Check the tablet library before --retry-uncertain; retrying may create a duplicate."
         fi
-        resolve_attachment
+        if [[ -n $ATTACHMENT_KEY_OPT ]]; then
+            metadata "items/$ITEM_KEY" "$WORK/item.json"
+            "$JQ" -e --arg key "$ITEM_KEY" '.data.key==$key and (.data.itemType|type=="string")' \
+              "$WORK/item.json" >/dev/null || fail zotero_error "Invalid source item metadata."
+            metadata "items/$ATTACHMENT_KEY_OPT" "$WORK/attachment-check.json"
+            "$JQ" -e --arg key "$ATTACHMENT_KEY_OPT" --arg parent "$ITEM_KEY" '
+              .data.key==$key and .data.parentItem==$parent and .data.contentType=="application/pdf"
+              and (.data.linkMode=="imported_file" or .data.linkMode=="imported_url")' \
+              "$WORK/attachment-check.json" >/dev/null ||
+              fail unsupported_item "The requested attachment is not a stored PDF that belongs to this item."
+            ATTACHMENT=$ATTACHMENT_KEY_OPT
+        else
+            resolve_attachment
+        fi
         import_selected_pdf
+        REMARKABLE_TAGS_UPDATED=false
+        REMARKABLE_TAGS_ERROR=
+        if [[ ($INCLUDE_ZOTERO_TAGS == true || $ADD_UNREAD_TAG == true) ]] &&
+          "$JQ" -e '.already_imported==false' "$WORK/import-result.json" >/dev/null; then
+            DOCUMENT_UUID="$("$JQ" -r '.rm_uuid' "$WORK/import-result.json")"
+            if (apply_selected_tags) >"$WORK/tag-result.json"; then
+                REMARKABLE_TAGS_UPDATED=true
+            else
+                REMARKABLE_TAGS_ERROR="$("$JQ" -r '.error // "tag_update_error"' "$WORK/tag-result.json" 2>/dev/null ||
+                  printf '%s' tag_update_error)"
+            fi
+        fi
+        "$JQ" --argjson tags_updated "$REMARKABLE_TAGS_UPDATED" --arg tags_error "$REMARKABLE_TAGS_ERROR" \
+          '.+{remarkable_tags_updated:$tags_updated}
+          + (if $tags_error=="" then {} else {remarkable_tags_error:$tags_error} end)' \
+          "$WORK/import-result.json"
         ;;
 esac

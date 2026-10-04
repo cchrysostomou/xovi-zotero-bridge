@@ -9,6 +9,7 @@ $files = @(
     @{ Path = (Join-Path $source "3.27\zoteroQuickSync.qmd"); Name = "3.27/zoteroQuickSync.qmd" }
     @{ Path = (Join-Path $source "3.28\zoteroQuickSync.qmd"); Name = "3.28/zoteroQuickSync.qmd" }
     @{ Path = (Join-Path $source "3.28\zoteroBridgeSettings.qmd"); Name = "3.28/zoteroBridgeSettings.qmd" }
+    @{ Path = (Join-Path $source "3.28\zoteroSendToZotero.qmd"); Name = "3.28/zoteroSendToZotero.qmd" }
 )
 
 foreach ($file in $files) {

@@ -40,6 +40,11 @@ def record_attempt($type; $library; $item; $attachment; $path):
   | .attempts[$type+":"+$library][$item]=
     (import_entry($type; $library; $item; $attachment; $path) + {state:"uncertain"});
 
+def drop_mapping($uuid):
+  require_import_layout
+  | if .mappings[$uuid]==null then error("document has no mapping to remove") else . end
+  | del(.mappings[$uuid]);
+
 def record_mapping($type; $library; $item; $attachment; $path; $uuid):
   if ($uuid | document_uuid | not) then error("invalid reMarkable document UUID") else . end
   | mapping_for_item($type; $library; $item) as $existing

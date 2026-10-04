@@ -20,7 +20,8 @@ class ZoteroTests(unittest.TestCase):
 
     def test_search_includes_books_and_uses_parent_items(self):
         self.bridge.zot.top.return_value = [
-            {"data": {"key": "BOOK1234", "itemType": "book", "title": "A book", "date": "2020"}}
+            {"data": {"key": "BOOK1234", "itemType": "book", "title": "A book", "date": "2020"},
+             "meta": {"numChildren": 1}}
         ]
         papers = self.bridge.search("book", limit=5)
         self.bridge.zot.top.assert_called_once_with(
@@ -29,6 +30,18 @@ class ZoteroTests(unittest.TestCase):
         )
         self.assertEqual(papers[0].title, "A book")
         self.assertTrue(papers[0].has_pdf)
+        self.bridge.zot.children.assert_not_called()
+
+    def test_has_pdf_reflects_numchildren_without_a_children_request(self):
+        self.bridge.zot.top.return_value = [
+            {"data": {"key": "BOOK1234", "itemType": "book", "title": "No children"},
+             "meta": {"numChildren": 0}},
+            {"data": {"key": "BOOK5678", "itemType": "book", "title": "Missing meta"}},
+        ]
+        papers = self.bridge.search("book", limit=5)
+        self.assertFalse(papers[0].has_pdf)
+        self.assertFalse(papers[1].has_pdf)
+        self.bridge.zot.children.assert_not_called()
 
     def test_or_tags_and_pagination_preserve_the_item_total(self):
         self.bridge.zot.top.return_value = [
@@ -68,6 +81,40 @@ class ZoteroTests(unittest.TestCase):
         self.assertEqual(self.bridge.list_tags(""), ["a", "z"])
         self.bridge.zot.tags.assert_called_once_with(q="", limit=100)
         self.bridge.zot.everything.assert_called_once_with(["z"])
+
+    def test_list_pdf_attachments_returns_only_stored_pdfs(self):
+        self.bridge.zot.children.return_value = [
+            {"data": {"key": "LINKED12", "contentType": "application/pdf", "linkMode": "linked_file"}},
+            {"data": {"key": "HOSTED12", "contentType": "application/pdf", "linkMode": "imported_file",
+                      "title": "Paper.pdf"}},
+            {"data": {"key": "NOTEEE12", "itemType": "note"}},
+        ]
+        attachments = self.bridge.list_pdf_attachments("BOOK1234")
+        self.assertEqual(len(attachments), 1)
+        self.assertEqual(attachments[0].attachment_key, "HOSTED12")
+        self.assertEqual(attachments[0].title, "Paper.pdf")
+
+    def test_download_attachment_rejects_wrong_parent_or_non_pdf(self):
+        self.bridge.zot.item.return_value = {"data": {
+            "key": "HOSTED12", "parentItem": "OTHER123", "contentType": "application/pdf",
+            "linkMode": "imported_file",
+        }}
+        with self.assertRaisesRegex(RuntimeError, "not a stored PDF"):
+            with self.bridge.download_attachment("BOOK1234", "HOSTED12"):
+                self.fail("mismatched parent accepted")
+
+    def test_download_attachment_downloads_a_specific_attachment(self):
+        self.bridge.zot.item.side_effect = lambda key: (
+            {"data": {"key": "HOSTED12", "parentItem": "BOOK1234", "contentType": "application/pdf",
+                      "linkMode": "imported_file", "filename": "Paper.pdf"}}
+            if key == "HOSTED12" else {"data": {"title": "A paper"}}
+        )
+        self.bridge.zot.dump.side_effect = lambda key, filename, path: (
+            Path(path) / filename
+        ).write_bytes(b"%PDF-1.7\nexample")
+        with self.bridge.download_attachment("BOOK1234", "HOSTED12") as (path, key):
+            self.assertEqual(key, "HOSTED12")
+            self.assertTrue(path.exists())
 
     def test_download_is_private_and_cleaned_after_consumer_error(self):
         def dump(key, filename, path):

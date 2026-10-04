@@ -11,3 +11,12 @@ bin/jq
 zotbridge-state.db.json
 zotbridge-state.db.json.*
 .zotbridge-work.*/
+
+# Vendored rmapi-fork tooling: keep only the runtime source we depend on;
+# never re-add its Go test files or binary test fixtures.
+tools/rmapi-fork/**/*_test.go
+tools/rmapi-fork/**/test.sh
+tools/rmapi-fork/**/testfiles/
+tools/rmapi-fork/**/test_v*.rm
+tools/rmapi-fork/**/test.zip
+tools/rmapi-fork/**/zipdoc_test.pdf

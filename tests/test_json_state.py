@@ -81,7 +81,27 @@ class JsonStateTests(unittest.TestCase):
                 self.store.tags("user:123", "", lambda: ["one"])
         self.assertFalse(self.path.exists())
 
-    def test_json_state_config_paths(self):
+    def test_collection_cache_miss_hit_and_refresh(self):
+        fetch = Mock(return_value=[{"key": "COLLECTA", "name": "Papers"}])
+        self.assertEqual(self.store.collections("user:123", fetch), [{"key": "COLLECTA", "name": "Papers"}])
+        fetch.side_effect = AssertionError("Unexpected network call")
+        self.assertEqual(self.store.collections("user:123", fetch), [{"key": "COLLECTA", "name": "Papers"}])
+        fetch.side_effect = None
+        fetch.return_value = [{"key": "COLLECTB", "name": "Notes"}]
+        self.assertEqual(
+            self.store.collections("user:123", fetch, refresh=True),
+            [{"key": "COLLECTB", "name": "Notes"}],
+        )
+
+    def test_corrupt_collection_cache_never_reset(self):
+        self.path.parent.mkdir()
+        self.path.write_text('{"version":1,"mappings":{},"attempts":{},"collection_cache":{"user:123":1}}')
+        fetch = Mock()
+        with self.assertRaises(JsonStateError):
+            self.store.collections("user:123", fetch, True)
+        fetch.assert_not_called()
+
+
         config_path = Path(self.temp.name) / "config.toml"
         raw = {"library_id": "123", "library_type": "user", "api_key": "fixture",
                "state_db_path": "./custom.db"}
@@ -105,6 +125,17 @@ class JsonStateTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 config_from_dict(raw, config_path)
 
+    def test_list_page_limit_configuration(self):
+        config_path = Path(self.temp.name) / "config.toml"
+        raw = {"library_id": "123", "library_type": "user", "api_key": "fixture"}
+        self.assertEqual(config_from_dict(raw, config_path).list_page_limit, 8)
+        raw["list_page_limit"] = 42
+        self.assertEqual(config_from_dict(raw, config_path).list_page_limit, 42)
+        for invalid in (0, 101, -1, "8", 8.5, True):
+            raw["list_page_limit"] = invalid
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                config_from_dict(raw, config_path)
+
     def test_clear_mappings_only_removes_the_selected_library(self):
         self.path.parent.mkdir()
         previous = {
@@ -123,6 +154,7 @@ class JsonStateTests(unittest.TestCase):
         self.assertEqual(self.store.clear_mappings("user", "123"), 1)
         current = json.loads(self.path.read_text())
         expected = json.loads(json.dumps(previous))
+        expected.setdefault("collection_cache", {})
         del expected["mappings"]["document-one"]
         self.assertEqual(current, expected)
         unchanged = self.path.read_bytes()
