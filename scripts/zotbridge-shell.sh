@@ -27,6 +27,17 @@ ACTIVITY_LOGGED=false
 LOCALGETA=
 SEVEN_ZIP=
 STATE_LOADED=false
+ATTACHMENT_TYPE=
+# jq source, prepended to a program that reads an attachment's .data, naming
+# the stored files the bridge can download: PDF and EPUB, the only types
+# rm-librarian imports. MOBI and other formats are deliberately excluded.
+ATTACHMENT_TYPE_JQ='def attachment_file_type:
+  if .linkMode=="imported_file" or .linkMode=="imported_url" then
+    if .contentType=="application/pdf" then "pdf"
+    elif .contentType=="application/epub+zip" then "epub"
+    else null end
+  else null end;
+'
 
 activity_event() {
     local event=$1 error=${2:-} tag=${3:-} count=${4:-} item=${5:-${ITEM_KEY:-}}
@@ -264,7 +275,7 @@ if [[ $COMMAND == send-to-zotero ]]; then
 fi
 if [[ $COMMAND == import || $COMMAND == sync-* || ($COMMAND == check-connection && -n $ITEM_KEY) ]]; then
     for dependency in unzip dd mv; do
-        command -v "$dependency" >/dev/null || fail missing_dependency "PDF operations require utility: $dependency."
+        command -v "$dependency" >/dev/null || fail missing_dependency "PDF and EPUB operations require utility: $dependency."
     done
 fi
 
@@ -617,34 +628,46 @@ metadata() {
     "$JQ" -e '.' "$2" >/dev/null || fail zotero_error "Zotero returned invalid metadata JSON."
 }
 find_attachment() {
-    local key=$1 start=0 count
+    local key=$1 start=0 count epub=
     ATTACHMENT=
+    ATTACHMENT_TYPE=
     while :; do
         metadata "items/$key/children?limit=100&start=$start" "$WORK/children.json"
         "$JQ" -e 'type=="array"' "$WORK/children.json" >/dev/null || fail zotero_error "Invalid attachment metadata."
-        ATTACHMENT="$("$JQ" -r '[.[]|.data|select(.contentType=="application/pdf" and
-          (.linkMode=="imported_file" or .linkMode=="imported_url"))][0].key // ""' "$WORK/children.json")"
+        # A PDF anywhere in the list wins over an EPUB, so a reference that
+        # selected its first PDF before EPUB support still selects that PDF.
+        ATTACHMENT="$("$JQ" -r "$ATTACHMENT_TYPE_JQ"'[.[]|.data|select(attachment_file_type=="pdf")][0].key // ""' \
+          "$WORK/children.json")"
         if [[ -n $ATTACHMENT ]]; then
             [[ $ATTACHMENT =~ ^[A-Z0-9]{8}$ ]] || fail zotero_error "Zotero returned an invalid attachment key."
+            ATTACHMENT_TYPE=pdf
             return
         fi
+        if [[ -z $epub ]]; then
+            epub="$("$JQ" -r "$ATTACHMENT_TYPE_JQ"'[.[]|.data|select(attachment_file_type=="epub")][0].key // ""' \
+              "$WORK/children.json")"
+        fi
         count="$("$JQ" 'length' "$WORK/children.json")"
-        ((count == 100)) || return 0
+        ((count == 100)) || break
         start=$((start + count))
         ((start < 10000)) || fail zotero_error "Attachment pagination exceeded the safety limit."
     done
+    [[ -n $epub ]] || return 0
+    [[ $epub =~ ^[A-Z0-9]{8}$ ]] || fail zotero_error "Zotero returned an invalid attachment key."
+    ATTACHMENT=$epub
+    ATTACHMENT_TYPE=epub
 }
 
-list_pdf_attachments() {
+list_attachments() {
     local start=0 count
-    : >"$WORK/child-pdfs.jsonl"
+    : >"$WORK/child-attachments.jsonl"
     while :; do
         metadata "items/$ITEM_KEY/children?limit=100&start=$start" "$WORK/children.json"
         "$JQ" -e 'type=="array"' "$WORK/children.json" >/dev/null || fail zotero_error "Invalid attachment metadata."
-        "$JQ" -c '.[]|select(.data.contentType=="application/pdf" and
-          (.data.linkMode=="imported_file" or .data.linkMode=="imported_url"))
-          |{attachment_key:.data.key,title:((.data.title // .data.filename // "")|tostring)}' \
-          "$WORK/children.json" >>"$WORK/child-pdfs.jsonl"
+        "$JQ" -c "$ATTACHMENT_TYPE_JQ"'.[]|select(.data|attachment_file_type!=null)
+          |{attachment_key:.data.key,title:((.data.title // .data.filename // "")|tostring),
+            file_type:(.data|attachment_file_type)}' \
+          "$WORK/children.json" >>"$WORK/child-attachments.jsonl"
         count="$("$JQ" 'length' "$WORK/children.json")"
         ((count == 100)) || break
         start=$((start + count))
@@ -654,7 +677,7 @@ list_pdf_attachments() {
       if map(.attachment_key) | all(test("^[A-Z0-9]{8}$")) then
         {ok:true,item_key:$key,attachments:.}
       else error("invalid attachment key") end' \
-      "$WORK/child-pdfs.jsonl" >"$WORK/children-result.json" ||
+      "$WORK/child-attachments.jsonl" >"$WORK/children-result.json" ||
       fail zotero_error "Zotero returned an invalid attachment key."
     if [[ $AS_JSON == true ]]; then "$JQ" '.' "$WORK/children-result.json"
     else "$JQ" -r '.attachments[]|[.attachment_key,.title]|@tsv' "$WORK/children-result.json"; fi
@@ -893,8 +916,20 @@ pdf_valid() {
     dd bs=1024 count=1 <"$1" | "$JQ" -Rse \
       'sub("^[ \t\r\n\u000b\f]*";"") | startswith("%PDF-")' >/dev/null
 }
-extract_pdf() {
-    local help member expected format
+epub_valid() {
+    [[ -f $1 ]] || return 1
+    # An EPUB is a ZIP container: require the ZIP local file header signature.
+    dd bs=1024 count=1 <"$1" | "$JQ" -Rse 'startswith("PK\u0003\u0004")' >/dev/null
+}
+document_valid() {
+    case "$1" in
+        pdf) pdf_valid "$2" ;;
+        epub) epub_valid "$2" ;;
+        *) return 1 ;;
+    esac
+}
+extract_attachment() {
+    local help member expected format downloaded="$WORK/document.$ATTACHMENT_TYPE" label=${ATTACHMENT_TYPE^^}
     local -a options
     if [[ -n $SEVEN_ZIP ]]; then
         format=7zz
@@ -907,41 +942,45 @@ extract_pdf() {
         case "$help" in
             *BusyBox*) options=(-p) ;;
             *UnZip*|*Info-ZIP*) options=(-p -P '') ;;
-            *) fail missing_dependency "PDF extraction requires bundled 7zz, BusyBox or Info-ZIP unzip." ;;
+            *) fail missing_dependency "Attachment extraction requires bundled 7zz, BusyBox or Info-ZIP unzip." ;;
         esac
         limited_command 8388608 "$WORK/zip-list" unzip -l "$WORK/download.zip" < /dev/null ||
             fail archive_error "Cannot list the item's WebDAV ZIP, or its listing exceeds the size limit."
     fi
-    "$JQ" -Rse --arg format "$format" --slurpfile attachment "$WORK/attachment.json" --argjson limit "$MAX_BYTES" \
+    "$JQ" -Rse --arg format "$format" --arg extension ".$ATTACHMENT_TYPE" \
+      --slurpfile attachment "$WORK/attachment.json" --argjson limit "$MAX_BYTES" \
       -f "$ROOT_DIR/scripts/zotbridge-shell-zip.jq" "$WORK/zip-list" >"$WORK/zip-selected.json" ||
-        fail archive_error "The item's WebDAV ZIP has an unsupported listing/name, duplicate entries, or no unique PDF within the size limit."
+        fail archive_error "The item's WebDAV ZIP has an unsupported listing/name, duplicate entries, or no unique $label file within the size limit."
     member="$("$JQ" -r '.raw' "$WORK/zip-selected.json")"
     expected="$("$JQ" -r '.size' "$WORK/zip-selected.json")"
     # Never extract archive paths into the filesystem or allow password prompts.
     if [[ $format == 7zz ]]; then
-        limited_command "$expected" "$WORK/document.pdf" "$SEVEN_ZIP" "${options[@]}" \
+        limited_command "$expected" "$downloaded" "$SEVEN_ZIP" "${options[@]}" \
           "$WORK/download.zip" "$member" < /dev/null
     else
-        limited_command "$expected" "$WORK/document.pdf" unzip "${options[@]}" \
+        limited_command "$expected" "$downloaded" unzip "${options[@]}" \
           "$WORK/download.zip" "$member" < /dev/null
     fi ||
-        fail archive_error "The item's PDF extraction failed or exceeded its size bound; check for a corrupt or encrypted ZIP."
-    [[ $(wc -c < "$WORK/document.pdf") -eq $expected ]] ||
-        fail archive_error "The item's extracted PDF size does not match the ZIP listing."
+        fail archive_error "The item's $label extraction failed or exceeded its size bound; check for a corrupt or encrypted ZIP."
+    [[ $(wc -c < "$downloaded") -eq $expected ]] ||
+        fail archive_error "The item's extracted $label size does not match the ZIP listing."
     rm -f -- "$WORK/download.zip"
 }
-download_pdf() {
+download_document() {
     [[ -n ${ATTACHMENT:-} ]] || resolve_attachment
-    [[ -n $ATTACHMENT ]] || fail RuntimeError "No stored PDF attachment found for the item."
+    [[ -n $ATTACHMENT ]] || fail RuntimeError "No stored PDF or EPUB attachment found for the item."
+    [[ $ATTACHMENT_TYPE == pdf || $ATTACHMENT_TYPE == epub ]] ||
+        fail runtime_error "The attachment's file type was not resolved."
+    local downloaded="$WORK/document.$ATTACHMENT_TYPE" label=${ATTACHMENT_TYPE^^}
     if [[ $USE_WEBDAV == true ]]; then
         [[ -s $WORK/attachment.json ]] || metadata "items/$ATTACHMENT" "$WORK/attachment.json"
         local dav_url
         dav_url="$(get_config webdav_url)"
         request webdav "$dav_url$ATTACHMENT.zip" "$WORK/download.zip" "$MAX_BYTES" "$WEBDAV_TIMEOUT"
         [[ $HTTP_CODE == 200 ]] || fail webdav_error "WebDAV download was not HTTP 200. Check credentials and the exact Zotero ZIP directory; redirects are refused."
-        extract_pdf
+        extract_attachment
     else
-        request zotero "$API/items/$ATTACHMENT/file" "$WORK/document.pdf" "$MAX_BYTES" "$ZOTERO_TIMEOUT"
+        request zotero "$API/items/$ATTACHMENT/file" "$downloaded" "$MAX_BYTES" "$ZOTERO_TIMEOUT"
         if [[ $HTTP_CODE =~ ^30[12378]$ ]]; then
             # Deliberately strip ALL credentials on the storage redirect. Only one
             # absolute HTTPS hop is supported, never curl -L with an API header.
@@ -950,11 +989,11 @@ download_pdf() {
               (.[0]|test("^https://[^/@?#\\s]+(?:/[^\\s]*)?$")) then .[0] else error("redirect") end' \
               "$WORK/headers" >"$WORK/location.json" ||
                 fail zotero_error "Unsupported Zotero Storage redirect; expected one absolute HTTPS location."
-            request none "$("$JQ" -r '.' "$WORK/location.json")" "$WORK/document.pdf" "$MAX_BYTES" "$ZOTERO_TIMEOUT"
+            request none "$("$JQ" -r '.' "$WORK/location.json")" "$downloaded" "$MAX_BYTES" "$ZOTERO_TIMEOUT"
         fi
         [[ $HTTP_CODE == 200 ]] || fail zotero_error "Zotero Storage download was not HTTP 200; only one credential-free HTTPS redirect is supported."
     fi
-    pdf_valid "$WORK/document.pdf" || fail download_error "Downloaded attachment is not a PDF."
+    document_valid "$ATTACHMENT_TYPE" "$downloaded" || fail download_error "Downloaded attachment is not a $label file."
     metadata "items/$ITEM_KEY" "$WORK/item.json"
     local title
     title="$("$JQ" -r --arg key "$ITEM_KEY" '
@@ -967,8 +1006,8 @@ download_pdf() {
           | if .full or .n+$n>180 then .full=true else .s+=$char|.n+=$n end) | .s
       | sub("[ .]+$";"") | if length==0 then $key else . end
       | if test("^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\\.|$)";"i") then "_"+. else . end' "$WORK/item.json")"
-    PDF_PATH="$WORK/$title.pdf"
-    [[ $PDF_PATH == "$WORK/document.pdf" ]] || mv -- "$WORK/document.pdf" "$PDF_PATH"
+    DOCUMENT_PATH="$WORK/$title.$ATTACHMENT_TYPE"
+    [[ $DOCUMENT_PATH == "$downloaded" ]] || mv -- "$downloaded" "$DOCUMENT_PATH"
 }
 
 uuid_valid() { [[ $1 =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]]; }
@@ -1195,7 +1234,7 @@ case "$COMMAND" in
     tags) list_zotero_tags ;;
     collections) list_zotero_collections ;;
     library) library_list ;;
-    children) list_pdf_attachments ;;
+    children) list_attachments ;;
     status)
         load_state
         find_mapping
@@ -1209,9 +1248,10 @@ case "$COMMAND" in
     check-connection)
         storage=zotero; [[ $USE_WEBDAV != true ]] || storage=webdav
         if [[ -n $ITEM_KEY ]]; then
-            download_pdf
-            "$JQ" -cn --arg storage "$storage" --argjson bytes "$(wc -c < "$PDF_PATH")" \
-              '{ok:true,metadata:"accessible",storage:$storage,pdf_download:"verified",bytes:$bytes}'
+            download_document
+            "$JQ" -cn --arg storage "$storage" --arg type "$ATTACHMENT_TYPE" \
+              --argjson bytes "$(wc -c < "$DOCUMENT_PATH")" \
+              '{ok:true,metadata:"accessible",storage:$storage,file_type:$type,($type+"_download"):"verified",bytes:$bytes}'
         elif [[ ${CHECK_WEBDAV:-false} == true ]]; then
             metadata 'items/top?limit=1' "$WORK/items.json"
             check_webdav_connection
@@ -1220,7 +1260,7 @@ case "$COMMAND" in
         else
             metadata 'items/top?limit=1' "$WORK/items.json"
             "$JQ" -cn --arg storage "$storage" '{ok:true,metadata:"accessible",storage:$storage,
-              pdf_download:"not_tested",message:"Use --item-key with a parent item containing a PDF to test file access."}'
+              pdf_download:"not_tested",message:"Use --item-key with a parent item containing a PDF or EPUB to test file access."}'
         fi
         ;;
     list)
@@ -1242,16 +1282,16 @@ case "$COMMAND" in
             "$JQ" -e --arg key "$ITEM_KEY" '.data.key==$key and (.data.itemType|type=="string")' \
               "$WORK/item.json" >/dev/null || fail zotero_error "Invalid source item metadata."
             metadata "items/$ATTACHMENT_KEY_OPT" "$WORK/attachment-check.json"
-            "$JQ" -e --arg key "$ATTACHMENT_KEY_OPT" --arg parent "$ITEM_KEY" '
-              .data.key==$key and .data.parentItem==$parent and .data.contentType=="application/pdf"
-              and (.data.linkMode=="imported_file" or .data.linkMode=="imported_url")' \
-              "$WORK/attachment-check.json" >/dev/null ||
-              fail unsupported_item "The requested attachment is not a stored PDF that belongs to this item."
+            # Prints the file type only for a stored PDF/EPUB belonging to this item.
+            ATTACHMENT_TYPE="$("$JQ" -er --arg key "$ATTACHMENT_KEY_OPT" --arg parent "$ITEM_KEY" \
+              "$ATTACHMENT_TYPE_JQ"'select(.data.key==$key and .data.parentItem==$parent)
+              | .data | attachment_file_type // empty' "$WORK/attachment-check.json")" ||
+              fail unsupported_item "The requested attachment is not a stored PDF or EPUB that belongs to this item."
             ATTACHMENT=$ATTACHMENT_KEY_OPT
         else
             resolve_attachment
         fi
-        import_selected_pdf
+        import_selected_document
         REMARKABLE_TAGS_UPDATED=false
         REMARKABLE_TAGS_ERROR=
         if [[ ($INCLUDE_ZOTERO_TAGS == true || $ADD_UNREAD_TAG == true) ]] &&

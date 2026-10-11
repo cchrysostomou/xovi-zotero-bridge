@@ -293,7 +293,7 @@ or validates a PDF or imports into reMarkable. Credentials stay out of command-l
 arguments and output. TLS validation stays enabled, and requests time out after
 30 seconds. Your existing tablet `config.toml` is not modified.
 
-**The shell release supports Zotero listing, cached tags, PDF import/status,
+**The shell release supports Zotero listing, cached tags, PDF and EPUB import/status,
 mapping reset and librarian folder creation.** ReMarkable library browsing is
 deferred from the MVP. These standalone probes remain useful for diagnosing
 connectivity separately from the API.
@@ -331,8 +331,8 @@ size mismatch. Keep both private probe ZIPs out of Git and shared storage.
 
 ## Current status
 
-The tablet backend implements Zotero search, Zotero Storage or WebDAV PDF
-downloads, fixed-folder PDF import, UUID-keyed JSON mappings and import status.
+The tablet backend implements Zotero search, Zotero Storage or WebDAV PDF and EPUB
+downloads, fixed-folder PDF/EPUB import, UUID-keyed JSON mappings and import status.
 The destination is configured; reMarkable browsing/folder selection is deferred.
 The broker contract is verified against
 upstream source and exercised with real Linux FIFOs and a simulated broker.
@@ -347,10 +347,10 @@ updates are outside this MVP. Stored mappings are not a roundtrip sync engine.
 
 ```text
 CLI (eventually launched asynchronously by the xovi UI)
-  -> Zotero Web API: find items and PDF attachment identifiers
-  -> Zotero Storage OR configured WebDAV server: download the PDF
-  -> xovi-message-broker: ensure target folder, import PDF
-  -> read back imported PDF/metadata/content on the tablet
+  -> Zotero Web API: find items and PDF/EPUB attachment identifiers
+  -> Zotero Storage OR configured WebDAV server: download the PDF or EPUB
+  -> xovi-message-broker: ensure target folder, import the document
+  -> read back imported file/metadata/content on the tablet
   -> sync the source's non-queue Zotero tags to the reMarkable document
   -> local state: save Zotero item/attachment keys and reMarkable UUID
   -> sync commands only: conditionally replace the source's queue tag in Zotero
@@ -361,7 +361,7 @@ Search includes top-level bibliographic items, not just journal articles.
 `has_pdf` means a stored PDF attachment was found in metadata; downloading
 can still fail if its file has not been synced or is inaccessible. Laptop-only
 linked files are not supported. When WebDAV is enabled, metadata still comes
-from Zotero's Web API, but the actual PDF comes from your WebDAV server.
+from Zotero's Web API, but the actual file comes from your WebDAV server.
 
 ## Fixed-folder import and status
 
@@ -378,7 +378,8 @@ through librarian, so the MVP does not need a destination-folder browser.
 # Optional read-only check of the general downloader for a selected parent item.
 sh scripts/zotbridge-run.sh check-connection --item-key ABCD1234
 
-# Copies the first stored PDF attachment into the configured destination.
+# Copies the first stored PDF attachment (or, with no PDF, the first stored EPUB)
+# into the configured destination.
 sh scripts/zotbridge-run.sh import --item-key ABCD1234
 sh scripts/zotbridge-run.sh status --item-key ABCD1234
 
@@ -386,11 +387,12 @@ sh scripts/zotbridge-run.sh status --item-key ABCD1234
 sh scripts/zotbridge-run.sh import --item-key EFGH5678 --target-folder "Research/inbox"
 ```
 
-Use real reference keys from `list --json`, or a stored PDF attachment's own key
-to import that exact file. Plain `import` does not change Zotero tags or remove
+Use real reference keys from `list --json`, or a stored PDF or EPUB attachment's own
+key to import that exact file. Plain `import` does not change Zotero tags or remove
 anything from Zotero or WebDAV. A successful import returns the item/attachment keys, document
 UUID, destination path and `already_imported: false`. Before saving the mapping,
-the backend checks local metadata/content, PDF signature and copied byte count.
+the backend checks local metadata/content, the file signature (the `%PDF-` header,
+or the ZIP header every EPUB starts with) and the copied byte count.
 The final tablet acceptance step is to confirm the document appears and opens.
 Repeating the same item returns `already_imported: true` without network or broker
 work, even if the default folder changed; this is not a document-move command.
@@ -402,32 +404,66 @@ also include that saved state. See the recovery instructions below before using
 `--retry-uncertain`.
 
 WebDAV extraction supports BusyBox and Info-ZIP `unzip -l`/`-p`, including Zotero
-`%ZB64` names. It selects one unambiguous PDF, bounds extraction by its declared
+`%ZB64` names. It selects one unambiguous member of the attachment's type (`.pdf` or
+`.epub`), bounds extraction by its declared
 size and the configured limit, requires the exact byte count, and rejects
 unsupported/ambiguous names and reported unzip errors. It streams to a private
 file rather than extracting archive paths into the filesystem. No `head -c`,
 zipinfo (`-Z`), standalone Base64 decoder or Python is required. These are
-signature/size checks, not a full PDF parser; unzip integrity checks vary by
+signature/size checks, not a full PDF or EPUB parser; unzip integrity checks vary by
 implementation and compression method.
+
+### Supported file types
+
+The downloader imports a Zotero item's **stored PDF and EPUB attachments** (imported
+files or URLs, not linked files). `children --item-key KEY --json` lists them, each
+with a `file_type` of `pdf` or `epub`; the AppLoad app shows that type beside the
+attachment name. An EPUB is handed to rm-librarian with an `.epub` extension, so it
+becomes a normal reMarkable EPUB document, and its file signature is verified like a
+PDF's before the import is recorded.
+
+**MOBI is not supported.** rm-librarian's `importDocument` accepts only `.pdf`,
+`.epub` and `.rmdoc` files (it rejects everything else), and the tablet cannot open
+MOBI, so MOBI attachments are not listed and a tagged MOBI attachment is reported as
+`unsupported_item`. Other formats Zotero can store are treated the same way.
+
+When a command must choose an attachment itself (`import` or `sync-tagged` on a
+reference), it takes the first stored PDF and falls back to the first stored EPUB only
+when the reference has no PDF. A reference that already selected its PDF therefore keeps
+selecting it. Choose a specific attachment with `--attachment-key`, the AppLoad
+selection list, or by tagging the attachment itself.
+
+The bridge records one reMarkable document per Zotero item. After one attachment of an
+item has been imported through `import`, importing another attachment of that same item
+reports `already_imported: true` instead of downloading it (this applies to two PDFs
+exactly as it does to a PDF and an EPUB). To bring both formats of one item to the
+tablet, tag each attachment with the sync tag so each is its own source; `sync-tagged`
+then imports them as separate documents.
+
+Reverse synchronization and *Send to Zotero* remain PDF-only: they merge handwriting
+into the document's `.pdf`, so an EPUB document is left where it is and reported as
+`unsupported_export`. The optional Python development backend also still handles PDFs
+only; the shell backend is what the AppLoad app and the tablet use.
 
 ## Tagged sync for the Quick Settings action
 
 The shell backend supports both tagging patterns:
 
-| Tag location | PDF selected | Tag updated after success |
+| Tag location | File selected | Tag updated after success |
 |---|---|---|
-| Reference item | First stored PDF returned by its children endpoint | The reference's tag |
-| PDF attachment | That exact stored PDF | That attachment's tag |
-| Both select the same PDF | One import, deduplicated by library and attachment key | Both independently queued sources |
+| Reference item | First stored PDF returned by its children endpoint, else its first stored EPUB | The reference's tag |
+| PDF or EPUB attachment | That exact stored attachment | That attachment's tag |
+| Both select the same attachment | One import, deduplicated by library and attachment key | Both independently queued sources |
 
-A reference and a different tagged child can therefore import two PDFs. Notes,
-annotations, linked files/URLs and references without a stored PDF are reported as
+A reference and a different tagged child can therefore import two documents. Notes,
+annotations, linked files/URLs, unsupported formats such as MOBI and references
+without a stored PDF or EPUB are reported as
 failures, not marked synced. Existing mappings select the original imported file;
-if a reference now selects a different first PDF, sync reports `source_changed`
+if a reference now selects a different attachment, sync reports `source_changed`
 rather than silently replacing its association.
 
 **These commands write Zotero tags. The API key needs write access to the target
-library.** They do not edit local reMarkable tags or Zotero's PDF bytes.
+library.** They do not edit local reMarkable tags or Zotero's file bytes.
 
 ```sh
 # Live queue: to_sync -> synced, using default_target_folder.
@@ -453,12 +489,12 @@ is checked again before processing; a removed queue tag means a reported skip.
 
 Imports run serially. A batch lock rejects another simultaneous batch; each item
 holds the existing state/import locks through import and tag writeback. A verified
-mapping is saved before any tag update. Already mapped PDFs are checked for a
-present PDF/content/metadata and a non-deleted folder ancestry, allowing ordinary
+mapping is saved before any tag update. Already mapped documents are checked for a
+present file/content/metadata and a non-deleted folder ancestry, allowing ordinary
 renames and moves but refusing missing or trashed documents. These checks do not
-prove that every byte of a previously imported PDF is unchanged.
+prove that every byte of a previously imported file is unchanged.
 
-Writeback fetches the latest source, rechecks which PDF it selects, preserves all
+Writeback fetches the latest source, rechecks which attachment it selects, preserves all
 unrelated tags (including their types), and PATCHes only `tags` with
 `If-Unmodified-Since-Version`. HTTP 412 conflicts get at most three attempts with
 fresh data; they are never blindly overwritten. If writeback fails after import,
@@ -467,7 +503,7 @@ download/import. Network failures can leave the write outcome unknown; the next
 run reconciles against the live tags. Uncertain broker imports are never retried
 automatically.
 
-After verified PDF import or mapping reuse, the bridge changes the Zotero queue
+After verified document import or mapping reuse, the bridge changes the Zotero queue
 tag to the completion tag. It then separately asks rm-librarian to add every
 other source tag to the reMarkable document, plus two fixed marker tags,
 `zotero-import` and `unread`, while preserving existing reMarkable tags.
@@ -476,7 +512,7 @@ but does not undo or block Zotero completion.
 
 Batch output contains `ok`, `total`, `processed`, `synced`, `skipped`, `failed`,
 `remaining` (unprocessed keys), and per-source `results`. `synced` counts source
-items, not newly created PDFs; results expose `already_imported` and `rm_uuid`.
+items, not newly created documents; results expose `already_imported` and `rm_uuid`.
 Partial failure exits nonzero. Item-specific failures can continue; shared
 network, permission, state or broker failures stop processing and report remaining
 keys. `sync-item` returns one result or a structured error. Use `status` to inspect
@@ -492,7 +528,7 @@ Supported inline Zotero markup is stripped, filesystem/protocol delimiters and
 control characters are removed, whitespace is normalized, and valid Unicode is
 preserved. The original ZIP member filename is not rewritten.
 
-The activity log records a `hit` entry for every queued source whose PDF resolves,
+The activity log records a `hit` entry for every queued source whose attachment resolves,
 including the Zotero source item key and the attachment's `.data.filename` read
 from the Zotero API.
 
@@ -621,12 +657,14 @@ not ship a second backend. The UI reuses the existing bridge commands:
 ```sh
 sh scripts/zotbridge-run.sh tags --json
 sh scripts/zotbridge-run.sh list --page-info --limit 8 --skip 0 --query "attention" --tag unread
-sh scripts/zotbridge-run.sh import --item-key ABCD1234
+sh scripts/zotbridge-run.sh children --item-key ABCD1234 --json
+sh scripts/zotbridge-run.sh import --item-key ABCD1234 --attachment-key EFGH5678
 ```
 
-This gives the app searchable tags, selected-tag filters, offset pagination and
-long-press import without duplicating Zotero API, mapping, duplicate-check or
-rm-librarian code. Build it with:
+This gives the app searchable tags, selected-tag filters, offset pagination, an
+expandable list of each item's downloadable PDF and EPUB attachments (see
+[Supported file types](#supported-file-types)) and multi-select download, without
+duplicating Zotero API, mapping, duplicate-check or rm-librarian code. Build it with:
 
 ```powershell
 .\scripts\package-xovi-appload.ps1
@@ -684,16 +722,18 @@ Relevant implementations are librarian `src/main.cpp` and message broker
 | Operation | Request to `/run/xovi-mb` | Reply from `/run/xovi-mb-out` |
 |---|---|---|
 | Ensure nested folder | `>eensureFolder:Zotero/unread\n` | Final folder UUID |
-| Import PDF | `>eimportDocument:/absolute/path/Paper.pdf,<folder-uuid>\n` | New document UUID |
+| Import PDF or EPUB | `>eimportDocument:/absolute/path/Paper.pdf,<folder-uuid>\n` (`.epub` for an EPUB) | New document UUID |
 
 Here `\n` denotes an actual newline. Requests have a 1024-byte UTF-8 limit.
+rm-librarian derives the document type from the file's extension and accepts only
+`.pdf`, `.epub` and `.rmdoc`; any other extension is rejected with `ERROR:`.
 Replies have **no newline terminator**: the broker writes a string and closes its
 output writer; EOF completes the response. Empty replies, `ERROR:` replies and
 invalid UUIDs are failures. There are no request IDs or per-client response pipes.
 
 The transport validates FIFO paths, bounds opening/writing/reading with a timeout,
 and locks each complete transaction. It accepts chunked responses.
-The returned import UUID is followed by a read-only check of the destination PDF,
+The returned import UUID is followed by a read-only check of the destination file (PDF or EPUB),
 metadata and content before a successful mapping is saved. This does not certify
 that xochitl has finished displaying the document or synced it to the cloud.
 
@@ -705,7 +745,7 @@ Python development backend has a read-only local `*.metadata` listing.
 
 - Bash, curl with HTTPS support and standard Linux shell utilities for listing.
 - BusyBox or Info-ZIP unzip is needed for WebDAV downloads and ZIP installation,
-  not for listing. PDF operations also use portable `dd` and `wc`.
+  not for listing. PDF and EPUB operations also use portable `dd` and `wc`.
 - jq for JSON and Base64 processing. The ARM64 package includes a verified static
   jq executable; a separate `base64` or `timeout` program is not needed.
 - Folder operations and imports require XOVI, xovi-message-broker and rm-librarian,
@@ -808,7 +848,7 @@ as well as JSON; startup failures such as missing tools are written to stderr.
 | `webdav_url` | Exact directory containing `<attachment-key>.zip` files, typically ending in `/zotero/` |
 | `webdav_username`, `webdav_password` | Required when WebDAV is enabled; prefer a read-only app password |
 | `webdav_timeout_s` | 60 seconds; greater than 0 and at most 300 |
-| `webdav_max_download_mb` | 100 MiB limit for both downloaded ZIP and extracted PDF; configurable from 1 to 2048 |
+| `webdav_max_download_mb` | 100 MiB limit for both downloaded ZIP and extracted attachment (PDF or EPUB); configurable from 1 to 2048 |
 | `webdav_allow_http` | False unless explicitly enabled; HTTP exposes credentials/files on the network |
 
 `ZOTBRIDGE_CONFIG` selects another config file; use an absolute path with the launcher.
@@ -831,6 +871,9 @@ ZOTBRIDGE_BACKEND=python sh scripts/zotbridge-run.sh check-connection
 ```
 
 `ZOTBRIDGE_PYTHON` selects a different Python executable for that backend.
+The Python backend downloads and imports PDFs only; PDF and EPUB support (see
+[Supported file types](#supported-file-types)) is implemented by the shell backend,
+which is what the AppLoad app uses.
 The shell backend can use `ZOTBRIDGE_JQ` to select an installed jq instead of
 the bundled ARM64 executable (useful when testing on an x86-64 computer).
 
@@ -842,15 +885,17 @@ include the actual attachment directory: this bridge does **not** append `zotero
 For a local server, use an address reachable from the tablet, not `localhost`.
 
 The backend reads `<attachment-key>.zip` with authenticated GET, supports Zotero's
-`%ZB64` encoded filenames, and extracts only the selected PDF into temporary storage.
-Unsafe archive paths, ambiguous PDFs and oversized downloads are rejected. It
+`%ZB64` encoded filenames, and extracts only the selected PDF or EPUB into temporary storage.
+Unsafe archive paths, ambiguous files and oversized downloads are rejected. It
 does not write ZIPs, `.prop` files, tags or metadata back to either server.
 WebDAV failures are reported, not silently redirected to Zotero Storage.
 
 `check-connection` tests metadata access only. Add `--item-key` for a parent item
-containing a PDF to validate the complete download path. It deletes the temporary
+containing a PDF or EPUB to validate the complete download path. It deletes the temporary
 download, does not touch import mappings and does not need a connected reMarkable.
-The result reports the storage backend and byte count, not credentials or titles.
+The result reports the storage backend, the downloaded `file_type` (`pdf` or `epub`,
+confirmed by `pdf_download` or `epub_download: "verified"`) and byte count, not
+credentials or titles.
 
 To migrate an existing `zotero2remarkable_bridge` `config.yml`, run
 `scripts/import-legacy-config.py SOURCE DESTINATION` using a Python environment with

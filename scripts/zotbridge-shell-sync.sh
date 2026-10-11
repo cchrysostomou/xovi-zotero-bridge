@@ -18,14 +18,14 @@ resolve_attachment() {
       "$WORK/item.json" >/dev/null || fail zotero_error "Invalid source item metadata."
     case "$("$JQ" -r '.data.itemType' "$WORK/item.json")" in
         attachment)
-            "$JQ" -e '.data | .contentType=="application/pdf" and
-              (.linkMode=="imported_file" or .linkMode=="imported_url")' "$WORK/item.json" >/dev/null ||
-              fail unsupported_item "The tagged attachment must be a stored PDF, not a linked file or URL."
+            ATTACHMENT_TYPE="$("$JQ" -r "$ATTACHMENT_TYPE_JQ"'.data | attachment_file_type // ""' "$WORK/item.json")"
+            [[ -n $ATTACHMENT_TYPE ]] ||
+              fail unsupported_item "The tagged attachment must be a stored PDF or EPUB, not a linked file, URL or another format."
             ATTACHMENT=$ITEM_KEY ;;
-        note|annotation) fail unsupported_item "Tag a reference or stored PDF attachment, not a note or annotation." ;;
+        note|annotation) fail unsupported_item "Tag a reference or stored PDF/EPUB attachment, not a note or annotation." ;;
         *) find_attachment "$ITEM_KEY" ;;
     esac
-    [[ -n $ATTACHMENT ]] || fail no_pdf "No stored PDF attachment found for the reference."
+    [[ -n $ATTACHMENT ]] || fail no_pdf "No stored PDF or EPUB attachment found for the reference."
 }
 
 load_attachment_filename() {
@@ -33,19 +33,19 @@ load_attachment_filename() {
     "$JQ" -e --arg key "$ATTACHMENT" '.data.key==$key and
       (.data.filename|type=="string" and length>0 and
         (test("[\u0000-\u001f\u007f]") | not))' "$WORK/attachment.json" >/dev/null ||
-      fail zotero_error "Zotero returned invalid PDF attachment metadata."
+      fail zotero_error "Zotero returned invalid attachment metadata."
     ZOTERO_FILENAME="$("$JQ" -r '.data.filename' "$WORK/attachment.json")"
 }
 
 verify_mapped_document() {
-    local uuid parent depth=0
+    local uuid parent depth=0 file_type
     uuid="$("$JQ" -r '.rm_uuid' "$WORK/mapping.json")"
+    file_type="$("$JQ" -r '.fileType // ""' "$LIBRARY/$uuid.content")" || file_type=
     "$JQ" -e '.state=="imported"' "$WORK/mapping.json" >/dev/null &&
       "$JQ" -e '.type=="DocumentType" and .deleted!=true and (.parent|type=="string")' \
         "$LIBRARY/$uuid.metadata" >/dev/null &&
-      "$JQ" -e '.fileType=="pdf"' "$LIBRARY/$uuid.content" >/dev/null &&
-      pdf_valid "$LIBRARY/$uuid.pdf" ||
-      fail verification_error "The mapped reMarkable PDF is missing, deleted or invalid; its Zotero tag was not changed."
+      document_valid "$file_type" "$LIBRARY/$uuid.$file_type" ||
+      fail verification_error "The mapped reMarkable document is missing, deleted or invalid; its Zotero tag was not changed."
     parent="$("$JQ" -r '.parent' "$LIBRARY/$uuid.metadata")"
     while [[ -n $parent ]]; do
         ((depth < 200)) && uuid_valid "$parent" &&
@@ -57,11 +57,11 @@ verify_mapped_document() {
     done
 }
 
-import_selected_pdf() {
+import_selected_document() {
     find_mapping
     if "$JQ" -e --arg attachment "$ATTACHMENT" \
       '.!=null and .zotero_attachment_key!=$attachment' "$WORK/mapping.json" >/dev/null; then
-        fail source_changed "This source was previously imported with a different PDF. Inspect its mapping before importing again."
+        fail source_changed "This source was previously imported from a different attachment. Inspect its mapping before importing again."
     fi
     "$JQ" -L "$ROOT_DIR/scripts" --arg type "$LIBRARY_TYPE" --arg library "$LIBRARY_ID" \
       --arg attachment "$ATTACHMENT" 'include "zotbridge-shell-mapping";
@@ -78,22 +78,23 @@ import_selected_pdf() {
     if [[ $RETRY != true ]] && "$JQ" -e --arg scope "$LIBRARY_SCOPE" --arg key "$ITEM_KEY" \
       --arg attachment "$ATTACHMENT" '.attempts[$scope] // {} | to_entries |
       any(.[]; .key==$key or .value.zotero_attachment_key==$attachment)' "$WORK/state.json" >/dev/null; then
-        fail import_uncertain "This item or PDF has an unconfirmed import. Inspect the tablet before explicitly retrying; sync never retries uncertain imports."
+        fail import_uncertain "This item or attachment has an unconfirmed import. Inspect the tablet before explicitly retrying; sync never retries uncertain imports."
     fi
-    download_pdf
-    [[ $PDF_PATH != *,* && $PDF_PATH != *$'\n'* && $PDF_PATH != *$'\r'* ]] ||
+    download_document
+    [[ $DOCUMENT_PATH != *,* && $DOCUMENT_PATH != *$'\n'* && $DOCUMENT_PATH != *$'\r'* ]] ||
         fail ValueError "The absolute import path cannot contain a comma or newline. Choose a different ZOTBRIDGE_WORK_DIR."
     broker ensureFolder "$TARGET"
     FOLDER_UUID=$BROKER_UUID
     state_record attempt
-    broker importDocument "$PDF_PATH,$FOLDER_UUID"
+    broker importDocument "$DOCUMENT_PATH,$FOLDER_UUID"
     DOCUMENT_UUID=$BROKER_UUID
+    # rm-librarian names the stored file and its fileType after the extension it was given.
     "$JQ" -e --arg parent "$FOLDER_UUID" '.type=="DocumentType" and .parent==$parent and .deleted!=true' \
       "$LIBRARY/$DOCUMENT_UUID.metadata" >/dev/null &&
-      "$JQ" -e '.fileType=="pdf"' "$LIBRARY/$DOCUMENT_UUID.content" >/dev/null &&
-      pdf_valid "$LIBRARY/$DOCUMENT_UUID.pdf" &&
-      [[ $(wc -c < "$LIBRARY/$DOCUMENT_UUID.pdf") -eq $(wc -c < "$PDF_PATH") ]] ||
-      fail verification_error "Imported document metadata/content/PDF did not match the expected destination; import remains uncertain."
+      "$JQ" -e --arg type "$ATTACHMENT_TYPE" '.fileType==$type' "$LIBRARY/$DOCUMENT_UUID.content" >/dev/null &&
+      document_valid "$ATTACHMENT_TYPE" "$LIBRARY/$DOCUMENT_UUID.$ATTACHMENT_TYPE" &&
+      [[ $(wc -c < "$LIBRARY/$DOCUMENT_UUID.$ATTACHMENT_TYPE") -eq $(wc -c < "$DOCUMENT_PATH") ]] ||
+      fail verification_error "Imported document metadata/content/file did not match the expected destination; import remains uncertain."
     state_record mapping
     "$JQ" -cn --arg item "$ITEM_KEY" --arg attachment "$ATTACHMENT" --arg uuid "$DOCUMENT_UUID" --arg path "$TARGET" \
       '{ok:true,already_imported:false,item_key:$item,attachment_key:$attachment,rm_uuid:$uuid,rm_path:$path}' \
@@ -215,7 +216,7 @@ sync_item() {
     resolve_attachment
     load_attachment_filename
     activity_event hit "" "$QUEUE_TAG" "" "$ITEM_KEY" "$ZOTERO_FILENAME"
-    import_selected_pdf
+    import_selected_document
     DOCUMENT_UUID="$("$JQ" -r '.rm_uuid' "$WORK/import-result.json")"
     mark_source_synced
     REMARKABLE_TAGS_UPDATED=false

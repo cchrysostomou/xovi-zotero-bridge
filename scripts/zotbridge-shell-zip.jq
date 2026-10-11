@@ -38,10 +38,10 @@ def seven_zip_entries:
         or ($name|test("[\\\\:\u0000-\u001f\u007f]") or startswith("/")
             or (split("/")|index("..")!=null))
      then error("unsafe or unsupported member name") else . end
-   | select($name|ascii_downcase|endswith(".pdf"))
+   | select($name|ascii_downcase|endswith($extension))
    | . + {name:$name}] as $candidates
 | ($candidates | map(select(.name==($attachment[0].data.filename // "")))) as $matches
 | (if ($matches|length)==1 then $matches[0]
    elif ($candidates|length)==1 then $candidates[0]
-   else error("no uniquely identifiable PDF") end)
-| if .size<5 or .size>$limit then error("PDF exceeds size bounds") else . end
+   else error("no uniquely identifiable " + $extension + " file") end)
+| if .size<5 or .size>$limit then error("attachment exceeds size bounds") else . end

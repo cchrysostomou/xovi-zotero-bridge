@@ -40,8 +40,9 @@ if method == "PATCH":
     entry.update(version=int(version), tags=payload["tags"])
     state = json.loads((db_path.parent / "state.db.json").read_text())
     assert state["mappings"], "PATCH occurred before a saved import"
-    assert any((db_path.parent / "library" / (uuid + ".pdf")).is_file()
-               for uuid in state["mappings"]), "PATCH occurred before PDF creation"
+    assert any((db_path.parent / "library" / f"{uuid}.{extension}").is_file()
+               for uuid in state["mappings"] for extension in ("pdf", "epub")), \
+        "PATCH occurred before the document was created"
     if db.get("conflicts", 0):
         db["conflicts"] -= 1
         item["version"] += 1
@@ -86,8 +87,8 @@ elif "/items/" in url.path:
         body = json.dumps(item).encode()
 elif url.path.endswith(".zip"):
     key = url.path.rsplit("/", 1)[-1].removesuffix(".zip")
-    body = (b"not a zip" if db.get("bad_archive") == key
-            else Path(os.environ["FAKE_ARCHIVE"]).read_bytes())
+    archive = db.get("archives", {}).get(key) or os.environ["FAKE_ARCHIVE"]
+    body = b"not a zip" if db.get("bad_archive") == key else Path(archive).read_bytes()
 else:
     status, body = "404", b"Not found"
 db_path.write_text(json.dumps(db))
@@ -101,11 +102,16 @@ sys.stdout.write(status)
 '''
 
 
-def item(key, kind="journalArticle", tags=(), parent=None):
+EPUB = "application/epub+zip"
+MOBI = "application/x-mobipocket-ebook"
+
+
+def item(key, kind="journalArticle", tags=(), parent=None, content_type="application/pdf",
+         filename="Paper.pdf"):
     data = {"key": key, "itemType": kind, "title": key,
             "tags": [{"tag": tag, "type": 0} for tag in tags]}
     if kind == "attachment":
-        data.update(contentType="application/pdf", linkMode="imported_file", filename="Paper.pdf")
+        data.update(contentType=content_type, linkMode="imported_file", filename=filename)
         if parent:
             data["parentItem"] = parent
     return {"key": key, "version": 1, "data": data}
@@ -153,11 +159,13 @@ class TaggedSyncTests(unittest.TestCase):
             source, parent = request.decode().strip().split(":", 1)[1].rsplit(",", 1)
             uuid = [self.document, self.second_document][len(self.imported)].decode()
             self.imported.append(uuid)
-            shutil.copyfile(source, self.library / f"{uuid}.pdf")
+            # rm-librarian stores <uuid>.<extension> and records the extension as fileType.
+            file_type = Path(source).suffix[1:].lower()
+            shutil.copyfile(source, self.library / f"{uuid}.{file_type}")
             (self.library / f"{uuid}.metadata").write_text(json.dumps({
                 "type": "DocumentType", "parent": parent, "visibleName": "Renamable",
             }))
-            (self.library / f"{uuid}.content").write_text('{"fileType":"pdf"}')
+            (self.library / f"{uuid}.content").write_text(json.dumps({"fileType": file_type}))
 
     def assert_ok(self, result):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -365,6 +373,114 @@ class TaggedSyncTests(unittest.TestCase):
         data = json.loads(result.stdout)
         self.assertEqual((data["failed"], data["synced"], data["remaining"]), (1, 1, []))
         self.assertEqual(self.tags("MISSING1"), [{"tag": "to_sync", "type": 0}])
+
+    def epub_attachment(self, key="EPUB1234", tags=(), parent=None):
+        return item(key, "attachment", tags, parent, content_type=EPUB, filename="Book.epub")
+
+    def epub_archive(self, key="EPUB1234", text=b"A tiny book"):
+        epub = smoke.make_epub(text)
+        archive = self.root / f"{key}.zip"
+        smoke.write_zip(archive, [("Book.epub", epub)])
+        return epub, {key: str(archive)}
+
+    def test_tagged_epub_attachment_imports_as_an_epub_document(self):
+        epub, archives = self.epub_archive()
+        self.seed([self.epub_attachment(tags=["to_sync", "novel"])], archives=archives)
+        with self.broker_reply([self.folder, self.document, b"ok"], self.simulate) as requests:
+            result = self.assert_ok(self.run_cli("sync-tagged"))
+        self.assertEqual((result["synced"], result["failed"]), (1, 0))
+        self.assertEqual(result["results"][0]["attachment_key"], "EPUB1234")
+        uuid = self.document.decode()
+        self.assertEqual((self.library / f"{uuid}.epub").read_bytes(), epub)
+        self.assertFalse((self.library / f"{uuid}.pdf").exists())
+        self.assertEqual(json.loads((self.library / f"{uuid}.content").read_text())["fileType"], "epub")
+        self.assertIn(b"/EPUB1234.epub," + self.folder, requests[1])
+        self.assertEqual({t["tag"] for t in self.tags("EPUB1234")}, {"novel", "synced"})
+        metadata = json.loads((self.library / f"{uuid}.metadata").read_text())
+        self.assertEqual(metadata["tags"], ["novel", "unread", "zotero-import"])
+        hits = [entry for entry in json.loads(
+            self.run_cli("activity-log").stdout)["entries"] if entry["event"] == "hit"]
+        self.assertEqual([(entry["item_key"], entry["filename"]) for entry in hits],
+                         [("EPUB1234", "Book.epub")])
+        self.assertFalse(list(self.root.glob(".zotbridge-work.*")))
+
+    def test_tagged_reference_without_a_pdf_imports_its_epub(self):
+        epub, archives = self.epub_archive()
+        self.seed([item("ITEM1234", tags=["to_sync"]), self.epub_attachment(parent="ITEM1234")],
+                  archives=archives)
+        with self.broker_reply([self.folder, self.document, b"ok"], self.simulate):
+            result = self.assert_ok(self.run_cli("sync-tagged"))
+        self.assertEqual(result["results"][0]["attachment_key"], "EPUB1234")
+        self.assertEqual((self.library / f"{self.document.decode()}.epub").read_bytes(), epub)
+        self.assertEqual({t["tag"] for t in self.tags("ITEM1234")}, {"synced"})
+        self.assertEqual(self.tags("EPUB1234"), [])
+
+    def test_tagged_reference_prefers_its_pdf_over_an_epub_listed_before_it(self):
+        _, archives = self.epub_archive()
+        self.seed([
+            item("ITEM1234", tags=["to_sync"]),
+            self.epub_attachment(parent="ITEM1234"),
+            item("HOSTED12", "attachment", parent="ITEM1234"),
+        ], archives=archives)
+        with self.broker_reply([self.folder, self.document, b"ok"], self.simulate):
+            result = self.assert_ok(self.run_cli("sync-tagged"))
+        self.assertEqual(result["results"][0]["attachment_key"], "HOSTED12")
+        self.assertTrue((self.library / f"{self.document.decode()}.pdf").is_file())
+        self.assertFalse(any(c["path"].endswith("/EPUB1234.zip") for c in self.requests_made()))
+
+    def test_tagged_mobi_attachment_is_unsupported_and_later_items_continue(self):
+        self.seed([
+            item("MOBI1234", "attachment", ["to_sync"], content_type=MOBI, filename="Book.mobi"),
+            item("HOSTED12", "attachment", ["to_sync"]),
+        ])
+        with self.broker_reply([self.folder, self.document, b"ok"], self.simulate):
+            result = self.run_cli("sync-tagged")
+        self.assertNotEqual(result.returncode, 0)
+        data = json.loads(result.stdout)
+        self.assertEqual((data["failed"], data["synced"], data["remaining"]), (1, 1, []))
+        self.assertEqual(data["results"][0]["error"], "unsupported_item")
+        self.assertIn("PDF or EPUB", data["results"][0]["message"])
+        self.assertEqual(self.tags("MOBI1234"), [{"tag": "to_sync", "type": 0}])
+        self.assertFalse(any(c["path"].endswith("/MOBI1234.zip") for c in self.requests_made()))
+
+    def test_mapped_epub_is_verified_before_tag_writeback(self):
+        epub, archives = self.epub_archive()
+        self.seed([self.epub_attachment(tags=["to_sync"])], archives=archives, patch_status=403)
+        with self.broker_reply([self.folder, self.document], self.simulate):
+            self.assertNotEqual(self.run_cli("sync-tagged").returncode, 0)
+        stored = self.library / f"{self.document.decode()}.epub"
+        writes = lambda: len([c for c in self.requests_made() if c["method"] == "PATCH"])
+        before = writes()
+        stored.write_bytes(b"<html>not an epub</html>")
+        invalid = self.run_cli("sync-item", "--item-key", "EPUB1234")
+        self.assertEqual(json.loads(invalid.stdout)["error"], "verification_error")
+        stored.unlink()
+        missing = self.run_cli("sync-item", "--item-key", "EPUB1234")
+        self.assertEqual(json.loads(missing.stdout)["error"], "verification_error")
+        self.assertEqual(writes(), before)
+        stored.write_bytes(epub)
+        db = json.loads(self.db.read_text())
+        db["patch_status"] = 204
+        self.db.write_text(json.dumps(db))
+        with self.broker_reply([b"ok"], self.simulate):
+            retried = self.assert_ok(self.run_cli("sync-item", "--item-key", "EPUB1234"))
+        self.assertTrue(retried["already_imported"])
+        self.assertEqual(self.tags("EPUB1234"), [{"tag": "synced", "type": 0}])
+
+    def test_pdf_and_epub_attachments_tagged_separately_import_both(self):
+        epub, archives = self.epub_archive()
+        self.seed([
+            item("ITEM1234"),
+            item("HOSTED12", "attachment", ["to_sync"], "ITEM1234"),
+            self.epub_attachment(tags=["to_sync"], parent="ITEM1234"),
+        ], archives=archives)
+        with self.broker_reply([self.folder, self.document, b"ok",
+                                self.folder, self.second_document, b"ok"], self.simulate):
+            result = self.assert_ok(self.run_cli("sync-tagged"))
+        self.assertEqual((result["synced"], result["failed"]), (2, 0))
+        self.assertTrue((self.library / f"{self.document.decode()}.pdf").is_file())
+        self.assertEqual((self.library / f"{self.second_document.decode()}.epub").read_bytes(), epub)
+        self.assertEqual(len(json.loads((self.root / "state.db.json").read_text())["mappings"]), 2)
 
     def test_bad_archive_is_logged_and_next_item_continues(self):
         self.seed([

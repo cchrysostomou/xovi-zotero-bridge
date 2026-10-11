@@ -54,6 +54,24 @@ assert.deepEqual(calls, [false]);
                                 capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    @unittest.skipUnless(shutil.which("node"), "AppLoad JavaScript test requires Node.js")
+    def test_appload_labels_attachments_with_their_file_type(self):
+        content = (ROOT / "xovi" / "appload" / "zotero-library" / "ui" /
+                   "ZoteroLibrary.qml").read_text()
+        match = re.search(r"^    function attachmentLabel\(attachment\) \{.*?^    \}",
+                          content, re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(match)
+        script = r'''
+const assert = require("node:assert/strict");
+assert.equal(attachmentLabel({title: "Paper", attachment_key: "ABCD1234", file_type: "pdf"}), "[PDF]  Paper");
+assert.equal(attachmentLabel({title: "Book", attachment_key: "ABCD1234", file_type: "epub"}), "[EPUB]  Book");
+assert.equal(attachmentLabel({title: "", attachment_key: "ABCD1234", file_type: "epub"}), "[EPUB]  ABCD1234");
+assert.equal(attachmentLabel({title: "Untyped", attachment_key: "ABCD1234"}), "Untyped");
+'''
+        result = subprocess.run([shutil.which("node"), "-e", match.group() + "\n" + script],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     @unittest.skipUnless(shutil.which("node"), "Settings JavaScript test requires Node.js")
     def test_first_run_settings_javascript_flow(self):
         content = (ROOT / "xovi" / "3.28" / "zoteroBridgeSettings.qmd").read_text()
@@ -214,6 +232,8 @@ assert.match(status, /integer/);
         self.assertIn('color: "#0000ee"', qml)
         self.assertIn('"children", "--item-key"', qml)
         self.assertIn("--attachment-key", qml)
+        self.assertIn("app.attachmentLabel(modelData)", qml)
+        self.assertIn("No downloadable PDF or EPUB attachments found", qml)
         self.assertIn("--include-zotero-tags", qml)
         self.assertIn("--add-unread-tag", qml)
         self.assertNotIn("api_key", qml)
