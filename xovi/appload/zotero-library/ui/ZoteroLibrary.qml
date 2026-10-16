@@ -598,6 +598,13 @@ Rectangle {
         return (item.mapping && item.mapping.rm_path) ? item.mapping.rm_path : "";
     }
 
+    // Prefix the attachment title with its file type so a PDF and an EPUB of
+    // the same item can be told apart.
+    function attachmentLabel(attachment) {
+        var name = attachment.title || attachment.attachment_key;
+        return attachment.file_type ? "[" + attachment.file_type.toUpperCase() + "]  " + name : name;
+    }
+
     function isOnRemarkable(item) {
         return !!(item && item.mapping);
     }
@@ -1469,7 +1476,7 @@ Rectangle {
                                     Text {
                                         visible: uiState.children && uiState.children.length === 0
                                         width: parent.width
-                                        text: "No downloadable PDF attachments found"
+                                        text: "No downloadable PDF or EPUB attachments found"
                                         font.pixelSize: 16
                                         color: "#777777"
                                     }
@@ -1490,7 +1497,7 @@ Rectangle {
                                                 Text {
                                                     width: parent.width - 40
                                                     anchors.verticalCenter: parent.verticalCenter
-                                                    text: modelData.title || modelData.attachment_key
+                                                    text: app.attachmentLabel(modelData)
                                                     font.pixelSize: 16
                                                     color: selected ? "white" : "black"
                                                     elide: Text.ElideRight

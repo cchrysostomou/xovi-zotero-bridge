@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 import base64
 import errno
+import io
 import json
 import os
 from pathlib import Path
@@ -60,6 +61,15 @@ attachment = {"key":"HOSTED12","data":{"key":"HOSTED12","itemType":"attachment",
     "parentItem":"ITEM1234","contentType":"application/pdf","linkMode":"imported_file","filename":"Paper.pdf"}}
 status = "200"
 total = 1
+location = ""
+# FAKE_CHILDREN replaces the parent's child list; FAKE_ARCHIVES maps an
+# attachment key to its WebDAV zip and FAKE_FILES to the raw file Zotero
+# Storage serves (directly, or via a redirect when FAKE_FILE_REDIRECT is set).
+children = json.loads(os.environ["FAKE_CHILDREN"]) if "FAKE_CHILDREN" in os.environ else [attachment]
+children_by_key = {child["key"]: child for child in children}
+archives = json.loads(os.environ.get("FAKE_ARCHIVES", "{}"))
+files = json.loads(os.environ.get("FAKE_FILES", "{}"))
+key_in_path = path.rsplit("/", 1)[-1]
 if re.search(r"/collections/[A-Z0-9]{8}/items/top$", path):
     total = int(os.environ.get("FAKE_COLLECTION_ITEM_TOTAL", "1"))
     items = []
@@ -91,7 +101,7 @@ elif path.endswith("/items/top"):
         items.append({"key":key,"data":item_data,"meta":meta})
     body = json.dumps(items).encode()
 elif re.search(r"/items/ITEM[A-Z0-9]{4}/children$", path):
-    body = json.dumps([attachment]).encode()
+    body = json.dumps(children[start:start + limit]).encode()
 elif path.endswith("/tags"):
     total = int(os.environ.get("FAKE_TAG_TOTAL", "150"))
     prefix = os.environ.get("FAKE_TAG_PREFIX", "tag")
@@ -103,8 +113,19 @@ elif path.endswith("/items/ITEM1234"):
     body = json.dumps(data).encode()
 elif path.endswith("/items/HOSTED12"):
     body = json.dumps(attachment).encode()
+elif re.search(r"/items/[A-Z0-9]{8}$", path) and key_in_path in children_by_key:
+    body = json.dumps(children_by_key[key_in_path]).encode()
+elif re.search(r"/items/[A-Z0-9]{8}/file$", path) and path.split("/")[-2] in files:
+    if os.environ.get("FAKE_FILE_REDIRECT"):
+        status, body, location = "302", b"", "https://storage.example/" + path.split("/")[-2]
+    else:
+        body = Path(files[path.split("/")[-2]]).read_bytes()
+elif urlsplit(url).netloc == "storage.example" and key_in_path in files:
+    body = Path(files[key_in_path]).read_bytes()
 elif path.endswith("/zotero/") and options.get("request") == "PROPFIND":
     status, body = "207", b"<multistatus/>"
+elif path.endswith(".zip") and key_in_path[:-4] in archives:
+    body = Path(archives[key_in_path[:-4]]).read_bytes()
 elif path.endswith("/HOSTED12.zip"):
     status = os.environ.get("FAKE_WEBDAV_STATUS", "200")
     body = Path(os.environ["FAKE_ARCHIVE"]).read_bytes() if status == "200" else b"Unauthorized"
@@ -113,9 +134,13 @@ else:
 if path.startswith("/users/"):
     status = os.environ.get("FAKE_METADATA_STATUS", status)
 with Path(os.environ["FAKE_REQUESTS"]).open("a") as log:
-    log.write(json.dumps({"path":path,"query":urlsplit(url).query,"method":options.get("request","GET")})+"\n")
+    log.write(json.dumps({"path":path,"query":urlsplit(url).query,"method":options.get("request","GET"),
+                          "host":urlsplit(url).netloc,
+                          "authenticated":bool(options.get("header") or options.get("user"))})+"\n")
 if "dump-header" in options:
     header = "" if os.environ.get("FAKE_MISSING_TOTAL") else f"Total-Results: {total}\r\n"
+    if location:
+        header += f"Location: {location}\r\n"
     Path(options["dump-header"]).write_text("HTTP/1.1 "+status+" response\r\n"+header+"\r\n")
 if "output" in options:
     Path(options["output"]).write_bytes(body)
@@ -124,6 +149,31 @@ else:
 if "write-out" in options:
     sys.stdout.write(options["write-out"].replace("%{http_code}",status).replace("\\n","\n"))
 '''
+
+
+def attachment_item(key, content_type, filename, link_mode="imported_file", title=None, parent="ITEM1234"):
+    data = {"key": key, "itemType": "attachment", "parentItem": parent, "contentType": content_type,
+            "linkMode": link_mode, "filename": filename}
+    if title is not None:
+        data["title"] = title
+    return {"key": key, "data": data}
+
+
+def make_epub(text=b"A tiny book"):
+    """A real EPUB container: ZIP with a stored, first `mimetype` entry."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as epub:
+        epub.writestr(zipfile.ZipInfo("mimetype"), b"application/epub+zip",
+                      compress_type=zipfile.ZIP_STORED)
+        epub.writestr("META-INF/container.xml", b"<container/>", compress_type=zipfile.ZIP_DEFLATED)
+        epub.writestr("OEBPS/book.xhtml", text, compress_type=zipfile.ZIP_DEFLATED)
+    return buffer.getvalue()
+
+
+def write_zip(path, members):
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in members:
+            archive.writestr(name, data)
 
 @unittest.skipUnless(os.name == "posix" and JQ and shutil.which("unzip"),
                      "Shell smoke tests require Linux, jq and unzip")
@@ -1212,11 +1262,13 @@ class ShellSmokeTests(unittest.TestCase):
         source, parent = request.decode().strip().split(":", 1)[1].rsplit(",", 1)
         self.assertEqual(parent, self.folder.decode())
         uuid = self.document.decode()
-        shutil.copyfile(source, self.library / f"{uuid}.pdf")
+        # rm-librarian stores the file as <uuid>.<extension> and records that as its fileType.
+        file_type = Path(source).suffix[1:].lower()
+        shutil.copyfile(source, self.library / f"{uuid}.{file_type}")
         (self.library / f"{uuid}.metadata").write_text(json.dumps({
             "type": "DocumentType", "parent": parent, "visibleName": "Test Paper",
         }))
-        (self.library / f"{uuid}.content").write_text('{"fileType":"pdf"}')
+        (self.library / f"{uuid}.content").write_text(json.dumps({"fileType": file_type}))
 
     def test_import_default_folder_mapping_status_and_repeat(self):
         self.use_busybox()
@@ -1260,7 +1312,27 @@ class ShellSmokeTests(unittest.TestCase):
         data = json.loads(result.stdout)
         self.assertTrue(data["ok"])
         self.assertEqual(data["item_key"], "ITEM1234")
-        self.assertEqual(data["attachments"], [{"attachment_key": "HOSTED12", "title": "Paper.pdf"}])
+        self.assertEqual(data["attachments"], [
+            {"attachment_key": "HOSTED12", "title": "Paper.pdf", "file_type": "pdf"}])
+
+    def test_children_lists_stored_pdf_and_epub_but_not_mobi_or_linked_files(self):
+        self.env["FAKE_CHILDREN"] = json.dumps([
+            attachment_item("LINKED12", "application/pdf", "Linked.pdf", link_mode="linked_file"),
+            attachment_item("HOSTED12", "application/pdf", "Paper.pdf"),
+            attachment_item("EPUB1234", "application/epub+zip", "Book.epub", title="Book"),
+            attachment_item("EPUB5678", "application/epub+zip", "Web.epub", link_mode="linked_url"),
+            attachment_item("MOBI1234", "application/x-mobipocket-ebook", "Book.mobi"),
+            attachment_item("TEXT1234", "text/plain", "Notes.txt"),
+            {"key": "NOTE1234", "data": {"key": "NOTE1234", "itemType": "note", "note": "hi"}},
+        ])
+        result = self.run_cli("children", "--item-key", "ITEM1234", "--json")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)["attachments"], [
+            {"attachment_key": "HOSTED12", "title": "Paper.pdf", "file_type": "pdf"},
+            {"attachment_key": "EPUB1234", "title": "Book", "file_type": "epub"},
+        ])
+        plain = self.run_cli("children", "--item-key", "ITEM1234")
+        self.assertEqual(plain.stdout.splitlines(), ["HOSTED12\tPaper.pdf", "EPUB1234\tBook"])
 
     def test_import_with_explicit_attachment_key_and_selected_tags(self):
         self.prepare_import()
@@ -1307,6 +1379,233 @@ class ShellSmokeTests(unittest.TestCase):
         result = self.run_cli("import", "--item-key", "ITEM1234", "--attachment-key", "BADKEY99")
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(json.loads(result.stdout)["error"], "zotero_error")
+
+    def serve_attachments(self, children, **served):
+        """Configure the fake Zotero. `served` maps attachment key -> raw file bytes (Zotero
+        Storage) or a list of (member name, bytes) (the attachment's WebDAV ZIP)."""
+        self.env["FAKE_CHILDREN"] = json.dumps(children)
+        files, archives = {}, {}
+        for key, content in served.items():
+            if isinstance(content, bytes):
+                files[key] = self.root / f"{key}.file"
+                files[key].write_bytes(content)
+            else:
+                archives[key] = self.root / f"{key}.zip"
+                write_zip(archives[key], content)
+        self.env["FAKE_FILES"] = json.dumps({key: str(path) for key, path in files.items()})
+        self.env["FAKE_ARCHIVES"] = json.dumps({key: str(path) for key, path in archives.items()})
+
+    def use_zotero_storage(self):
+        self.config.write_text(self.config.read_text().replace("use_webdav = true", "use_webdav = false"))
+
+    def epub_child(self, key="EPUB1234", filename="Book.epub", **kwargs):
+        return attachment_item(key, "application/epub+zip", filename, **kwargs)
+
+    def logged_requests(self):
+        return [json.loads(line) for line in self.requests.read_text().splitlines()]
+
+    def test_import_epub_attachment_over_webdav(self):
+        self.prepare_import()
+        epub = make_epub()
+        self.serve_attachments([self.epub_child()], EPUB1234=[("Book.epub", epub)])
+        with self.broker_reply([self.folder, self.document], self.simulate_import) as requests:
+            result = self.run_cli("import", "--item-key", "ITEM1234", "--attachment-key", "EPUB1234")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual((data["attachment_key"], data["rm_uuid"]), ("EPUB1234", self.document.decode()))
+        # rm-librarian derives the document type from the extension of the file it is given.
+        self.assertIn(b"/Test Paper.epub," + self.folder, requests[1])
+        uuid = self.document.decode()
+        self.assertEqual((self.library / f"{uuid}.epub").read_bytes(), epub)
+        self.assertEqual(json.loads((self.library / f"{uuid}.content").read_text())["fileType"], "epub")
+        mapping = json.loads((self.root / "state.db.json").read_text())["mappings"][uuid]
+        self.assertEqual((mapping["zotero_item_key"], mapping["zotero_attachment_key"]),
+                         ("ITEM1234", "EPUB1234"))
+        self.assertTrue(any(r["path"].endswith("/EPUB1234.zip") for r in self.logged_requests()))
+        self.assertFalse(list(self.root.glob(".zotbridge-work.*")))
+
+    def test_import_resolves_an_epub_only_reference_without_an_attachment_key(self):
+        self.prepare_import()
+        epub = make_epub()
+        self.serve_attachments([self.epub_child()], EPUB1234=[("Book.epub", epub)])
+        with self.broker_reply([self.folder, self.document], self.simulate_import) as requests:
+            result = self.run_cli("import", "--item-key", "ITEM1234")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)["attachment_key"], "EPUB1234")
+        self.assertIn(b"/Test Paper.epub,", requests[1])
+
+    def test_import_epub_over_zotero_storage(self):
+        self.use_zotero_storage()
+        self.prepare_import()
+        epub = make_epub()
+        self.serve_attachments([self.epub_child()], EPUB1234=epub)
+        with self.broker_reply([self.folder, self.document], self.simulate_import) as requests:
+            result = self.run_cli("import", "--item-key", "ITEM1234", "--attachment-key", "EPUB1234")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(b"/Test Paper.epub," + self.folder, requests[1])
+        self.assertEqual((self.library / f"{self.document.decode()}.epub").read_bytes(), epub)
+        paths = [r["path"] for r in self.logged_requests()]
+        self.assertTrue(any(path.endswith("/items/EPUB1234/file") for path in paths))
+        self.assertFalse(any(path.endswith(".zip") for path in paths))
+
+    def test_storage_redirect_is_followed_without_credentials_for_pdf_and_epub(self):
+        self.use_zotero_storage()
+        self.env["FAKE_FILE_REDIRECT"] = "1"
+        cases = (("HOSTED12", attachment_item("HOSTED12", "application/pdf", "Paper.pdf"),
+                  b"%PDF-1.7\nTest PDF\n", "pdf"),
+                 ("EPUB1234", self.epub_child(), make_epub(), "epub"))
+        for key, child, content, file_type in cases:
+            with self.subTest(file_type=file_type):
+                self.requests.unlink(missing_ok=True)
+                self.serve_attachments([child], **{key: content})
+                result = self.run_cli("check-connection", "--item-key", "ITEM1234")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                data = json.loads(result.stdout)
+                self.assertEqual((data["file_type"], data[f"{file_type}_download"], data["bytes"]),
+                                 (file_type, "verified", len(content)))
+                hops = [r for r in self.logged_requests() if r["host"] == "storage.example"]
+                self.assertEqual(len(hops), 1)
+                self.assertFalse(hops[0]["authenticated"])
+                self.assertTrue(all(r["authenticated"] for r in self.logged_requests()
+                                    if r["host"] != "storage.example"))
+
+    def test_check_connection_reports_the_epub_it_verified(self):
+        epub = make_epub()
+        self.serve_attachments([self.epub_child()], EPUB1234=[("Book.epub", epub)])
+        result = self.run_cli("check-connection", "--item-key", "ITEM1234")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout), {
+            "ok": True, "metadata": "accessible", "storage": "webdav", "file_type": "epub",
+            "epub_download": "verified", "bytes": len(epub),
+        })
+        self.assertFalse((self.root / "state.db.json").exists())
+
+    def test_check_connection_keeps_the_pdf_result_keys(self):
+        result = self.run_cli("check-connection", "--item-key", "ITEM1234")
+        data = json.loads(result.stdout)
+        self.assertEqual((data["file_type"], data["pdf_download"]), ("pdf", "verified"))
+        self.assertNotIn("epub_download", data)
+
+    def test_implicit_resolution_prefers_a_pdf_over_an_epub_wherever_it_is_listed(self):
+        epub = [("Book.epub", make_epub())]
+        pdf = attachment_item("HOSTED12", "application/pdf", "Paper.pdf")
+        filler = [{"key": f"NOTE{i:04}", "data": {"key": f"NOTE{i:04}", "itemType": "note"}}
+                  for i in range(99)]
+        cases = {
+            "epub listed first": ([self.epub_child(), pdf], "pdf"),
+            "pdf on a later page": ([self.epub_child()] + filler + [pdf], "pdf"),
+            "epub on a later page": (filler + [{"key": "NOTE9999", "data": {
+                "key": "NOTE9999", "itemType": "note"}}, self.epub_child()], "epub"),
+            "only an epub": ([self.epub_child()], "epub"),
+        }
+        for name, (children, expected) in cases.items():
+            with self.subTest(name):
+                self.serve_attachments(children, EPUB1234=epub)
+                result = self.run_cli("check-connection", "--item-key", "ITEM1234")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(json.loads(result.stdout)["file_type"], expected)
+
+    def test_reference_without_a_pdf_or_epub_reports_no_attachment(self):
+        self.prepare_import()
+        self.serve_attachments([attachment_item("MOBI1234", "application/x-mobipocket-ebook", "Book.mobi"),
+                                self.epub_child("LINKED12", link_mode="linked_file")])
+        result = self.run_cli("import", "--item-key", "ITEM1234")
+        self.assertNotEqual(result.returncode, 0)
+        data = json.loads(result.stdout)
+        self.assertEqual(data["error"], "no_pdf")
+        self.assertIn("PDF or EPUB", data["message"])
+        self.assertFalse((self.root / "state.db.json").exists())
+
+    def test_explicit_attachment_must_be_a_stored_pdf_or_epub_of_the_item(self):
+        self.prepare_import()
+        self.serve_attachments([
+            attachment_item("MOBI1234", "application/x-mobipocket-ebook", "Book.mobi"),
+            self.epub_child("LINKED12", link_mode="linked_file"),
+            self.epub_child("OTHER123", parent="ZZZZ9999"),
+        ])
+        for key in ("MOBI1234", "LINKED12", "OTHER123"):
+            with self.subTest(attachment=key):
+                result = self.run_cli("import", "--item-key", "ITEM1234", "--attachment-key", key)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(json.loads(result.stdout)["error"], "unsupported_item")
+        self.assertFalse((self.root / "state.db.json").exists())
+
+    def test_downloaded_file_must_match_the_attachment_type(self):
+        epub, pdf = make_epub(), b"%PDF-1.7\nTest PDF\n"
+        html = b"<html>Please log in</html>"
+        pdf_child = attachment_item("HOSTED12", "application/pdf", "Paper.pdf")
+        cases = {
+            "html named as epub": (self.epub_child(), [("Book.epub", html)]),
+            "pdf named as epub": (self.epub_child(), [("Book.epub", pdf)]),
+            "epub named as pdf": (pdf_child, [("Paper.pdf", epub)]),
+        }
+        for name, (child, members) in cases.items():
+            with self.subTest(name):
+                self.serve_attachments([child], **{child["key"]: members})
+                result = self.run_cli("check-connection", "--item-key", "ITEM1234")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(json.loads(result.stdout)["error"], "download_error")
+        self.use_zotero_storage()
+        for name, (child, members) in cases.items():
+            with self.subTest("storage: " + name):
+                self.serve_attachments([child], **{child["key"]: members[0][1]})
+                result = self.run_cli("check-connection", "--item-key", "ITEM1234")
+                self.assertEqual(json.loads(result.stdout)["error"], "download_error")
+
+    def test_webdav_zip_member_must_have_the_attachments_extension(self):
+        epub = make_epub()
+        self.serve_attachments([self.epub_child()], EPUB1234=[("Book.epub", epub), ("Cover.pdf", b"%PDF-1.7\n")])
+        result = self.run_cli("check-connection", "--item-key", "ITEM1234")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)["bytes"], len(epub))
+        for name, members in {
+            "only a pdf member": [("Paper.pdf", b"%PDF-1.7\n")],
+            "two unrelated epub members": [("A.epub", epub), ("B.epub", epub)],
+            "no members of the type": [("notes.txt", b"hello world")],
+        }.items():
+            with self.subTest(name):
+                self.serve_attachments([self.epub_child()], EPUB1234=members)
+                failed = self.run_cli("check-connection", "--item-key", "ITEM1234")
+                self.assertNotEqual(failed.returncode, 0)
+                self.assertEqual(json.loads(failed.stdout)["error"], "archive_error")
+
+    def test_webdav_epub_member_is_selected_by_attachment_filename(self):
+        wanted, other = make_epub(b"wanted book " * 40), make_epub(b"other")
+        self.serve_attachments([self.epub_child(filename="Wanted.epub")],
+                               EPUB1234=[("Other.epub", other), ("Wanted.epub", wanted)])
+        result = self.run_cli("check-connection", "--item-key", "ITEM1234")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)["bytes"], len(wanted))
+
+    def test_truncated_epub_import_is_not_marked_successful(self):
+        self.prepare_import()
+        self.serve_attachments([self.epub_child()], EPUB1234=[("Book.epub", make_epub())])
+
+        def truncated(request):
+            self.simulate_import(request)
+            if request.startswith(b">eimportDocument:"):
+                stored = self.library / (self.document.decode() + ".epub")
+                stored.write_bytes(stored.read_bytes()[:-2])
+
+        with self.broker_reply([self.folder, self.document], truncated):
+            result = self.run_cli("import", "--item-key", "ITEM1234", "--attachment-key", "EPUB1234")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(json.loads(result.stdout)["error"], "verification_error")
+        self.assertEqual(json.loads((self.root / "state.db.json").read_text())["mappings"], {})
+
+    def test_epub_import_is_not_confirmed_when_librarian_records_another_type(self):
+        self.prepare_import()
+        self.serve_attachments([self.epub_child()], EPUB1234=[("Book.epub", make_epub())])
+
+        def wrong_type(request):
+            self.simulate_import(request)
+            if request.startswith(b">eimportDocument:"):
+                (self.library / f"{self.document.decode()}.content").write_text('{"fileType":"pdf"}')
+
+        with self.broker_reply([self.folder, self.document], wrong_type):
+            result = self.run_cli("import", "--item-key", "ITEM1234", "--attachment-key", "EPUB1234")
+        self.assertEqual(json.loads(result.stdout)["error"], "verification_error")
+        self.assertEqual(json.loads((self.root / "state.db.json").read_text())["mappings"], {})
 
     def test_unconfirmed_import_blocks_repeat_and_reports_status(self):
         self.prepare_import()

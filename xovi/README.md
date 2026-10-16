@@ -173,8 +173,9 @@ moves only fully verified uploads to `Copied2Zotero`; failures remain in the
 source folder and appear in the activity log with UUID, stage, and error code.
 
 The forward phase reads live `to_sync` tags on both references and attachments. A tagged
-reference selects its first stored PDF; a tagged attachment selects that exact
-PDF. Overlapping selections reuse the UUID mapping instead of importing twice.
+reference selects its first stored PDF, or its first stored EPUB when it has no PDF; a
+tagged attachment (PDF or EPUB) selects that exact file. Overlapping selections reuse
+the UUID mapping instead of importing twice. MOBI and other formats are not supported.
 After a confirmed import, the backend changes only the source's `to_sync` tag to
 `synced`. It separately asks rm-librarian to add the source's other Zotero tags,
 plus two fixed marker tags, `zotero-import` and `unread`, while preserving
@@ -182,7 +183,7 @@ existing reMarkable tags; tag failure is reported but does not
 block Zotero completion. Zotero API write permission is required.
 
 Each resolved forward-sync hit is written to the activity log with its queued
-Zotero item key and the PDF attachment filename returned by the Zotero API.
+Zotero item key and the attachment filename returned by the Zotero API.
 Attachment archive failures are logged per item and the batch continues with
 later queue entries. Imported display names remove unsupported delimiters,
 control characters, and inline Zotero markup while preserving valid Unicode.
@@ -223,15 +224,20 @@ with `manifest.json`, `icon.png`, and a compiled `resources.rcc`; it imports
 ```sh
 sh /home/root/xovi-zotero-bridge/scripts/zotbridge-run.sh tags --json
 sh /home/root/xovi-zotero-bridge/scripts/zotbridge-run.sh list --page-info --limit 8 --skip N --query TEXT --tag TAG
-sh /home/root/xovi-zotero-bridge/scripts/zotbridge-run.sh import --item-key KEY
+sh /home/root/xovi-zotero-bridge/scripts/zotbridge-run.sh children --item-key KEY --json
+sh /home/root/xovi-zotero-bridge/scripts/zotbridge-run.sh import --item-key KEY --attachment-key ATTACHMENT
 ```
 
-The app shows a searchable Zotero library, cached/live tag filters, previous/next
-offset pagination and long-press-to-import rows. The `list --page-info` command
-does all filtering and pagination; the app only passes selected tags/query/offset
-and renders the returned JSON. Long-press import uses the existing `import`
-command, so mapping, duplicate checks, target folder behavior and broker safety
-remain centralized in the backend.
+The app shows a searchable Zotero library, cached/live tag filters and previous/next
+offset pagination. Tapping an item lists its downloadable attachments, each labelled
+`[PDF]` or `[EPUB]` (MOBI and other formats are not downloadable, because rm-librarian
+cannot import them); select attachments and press **Download** to import them. The
+`list --page-info` command does all filtering and pagination; the app only passes
+selected tags/query/offset and renders the returned JSON. Downloads use the existing
+`import` command, so mapping, duplicate checks, target folder behavior and broker safety
+remain centralized in the backend. An item is tracked as one reMarkable document, so
+selecting a second attachment of an item that was already downloaded reports it as
+already imported; tag each attachment for `sync-tagged` to bring both formats across.
 
 To build only the AppLoad archive:
 
